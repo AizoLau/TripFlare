@@ -1,0 +1,48 @@
+{
+  "_comment": "SecMon default configuration. Copy to config.json (next to secmon.py) and edit; config.json wins over this file. JSON has no comments, so explanatory fields are prefixed with underscore.",
+  "interval_seconds": 60,
+  "_interval_seconds": "Seconds between scan rounds in daemon mode (60-600 recommended).",
+  "heavy_interval_rounds": 5,
+  "_heavy_interval_rounds": "Services / scheduled tasks / IFEO / StartupApproved are diffed every N rounds (heavy snapshot).",
+  "sha1_max_bytes": 52428800,
+  "_sha1_max_bytes": "SHA1 is computed only for NEW files, and skipped above this size (50 MB).",
+  "max_dir_entries": 20000,
+  "_max_dir_entries": "Directories with more entries than this are skipped (add game/cache dirs to exclude_dirs).",
+  "state_process_cap": 5000,
+  "score_thresholds": { "warn": 3, "high": 7 },
+  "_score_thresholds": ">=7 high (notify + desktop bat + URGENT.txt), 3-6 warn, <3 info.",
+  "allowlist": {
+    "_comment": "Manage with: secmon.py allow <path-or-signer>. Signers are matched as case-insensitive substrings of the certificate subject, e.g. allow \"CN=Microsoft Windows\".",
+    "paths": [],
+    "signers": []
+  },
+  "exclude_dirs": [],
+  "_exclude_dirs": "Absolute paths (env vars allowed) skipped by the file watcher, e.g. \"D:\\\\Games\".",
+  "watch_dirs": null,
+  "_watch_dirs": "null = built-in defaults: Startup x2 (depth 2), ProgramData (2), Downloads/Desktop (3), AppData Roaming/Local (2), Temp (1), user profile root (1). Override as [[path, depth], ...].",
+  "ai": {
+    "_comment": "Three modes: 'recommend' (default, AI only when you double-click the desktop bat), 'patrol' (AI runs automatically: immediately on high alerts + on a timer), 'off' (local heuristics only, never calls AI).",
+    "mode": "recommend",
+    "backend_path": "auto",
+    "_backend_path": "'auto' detects kimi.exe (~/.kimi-code/bin/kimi.exe, then PATH). Any CLI that maps '<bin> -p \"prompt\"' to text on stdout works; override backend_args if yours differs.",
+    "backend_args": ["-p", "{prompt}"],
+    "timeout_seconds": 600,
+    "max_calls_per_day": 20,
+    "_max_calls_per_day": "Daily AI-call circuit breaker (patrol mode). Manual ai-review is never blocked.",
+    "review_max_alerts": 20,
+    "patrol_interval_minutes": 30,
+    "_patrol_interval_minutes": "patrol mode: run one routine patrol this often, even without alerts.",
+    "patrol_immediate_cooldown_minutes": 10,
+    "_patrol_immediate_cooldown_minutes": "patrol mode: high alerts trigger an immediate patrol at most once per cooldown window (alerts merge inside the window).",
+    "patrol": {
+      "allow_auto_quarantine": false,
+      "_allow_auto_quarantine": "DANGEROUS. When true the patrol prompt permits moving high-confidence malware into quarantine. Default false: the AI is strictly read-only and only reports."
+    }
+  },
+  "notify": {
+    "balloon": true,
+    "_balloon": "Windows balloon notification on high alerts (non-blocking PowerShell NotifyIcon; silently skipped if it fails).",
+    "desktop_bat": true,
+    "_desktop_bat": "On high alerts (recommend/off modes) drop 'SecMon-运行AI研判.bat' on the desktop for one-click AI review."
+  }
+}

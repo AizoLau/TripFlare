@@ -1,5 +1,5 @@
 {
-  "_comment": "SecMon default configuration. Copy to config.json (next to secmon.py) and edit; config.json wins over this file. JSON has no comments, so explanatory fields are prefixed with underscore.",
+  "_comment": "TripFlare default configuration. Copy to config.json (next to tripflare.py) and edit; config.json wins over this file. JSON has no comments, so explanatory fields are prefixed with underscore.",
   "interval_seconds": 60,
   "_interval_seconds": "Seconds between scan rounds in daemon mode (60-600 recommended).",
   "heavy_interval_rounds": 5,
@@ -12,7 +12,7 @@
   "score_thresholds": { "warn": 3, "high": 7 },
   "_score_thresholds": ">=7 high (notify + desktop bat + URGENT.txt), 3-6 warn, <3 info.",
   "allowlist": {
-    "_comment": "Manage with: secmon.py allow <path-or-signer>. Signers are matched as case-insensitive substrings of the certificate subject, e.g. allow \"CN=Microsoft Windows\".",
+    "_comment": "Manage with: tripflare.py allow <path-or-signer>. Signers are matched as case-insensitive substrings of the certificate subject, e.g. allow \"CN=Microsoft Windows\".",
     "paths": [],
     "signers": []
   },
@@ -43,6 +43,6 @@
     "balloon": true,
     "_balloon": "Windows balloon notification on high alerts (non-blocking PowerShell NotifyIcon; silently skipped if it fails).",
     "desktop_bat": true,
-    "_desktop_bat": "On high alerts (recommend/off modes) drop 'SecMon-运行AI研判.bat' on the desktop for one-click AI review."
+    "_desktop_bat": "On high alerts (recommend/off modes) drop 'TripFlare-运行AI研判.bat' on the desktop for one-click AI review."
   }
 }

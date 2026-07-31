@@ -1,12 +1,12 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Removes the SecMon scheduled tasks (SecMonDaemon, SecMonPatrol).
-  Does NOT delete the project or the data directory %LOCALAPPDATA%\SecMon.
+  Removes the TripFlare scheduled tasks (TripFlareDaemon, TripFlarePatrol).
+  Does NOT delete the project or the data directory %LOCALAPPDATA%\TripFlare.
 #>
 $ErrorActionPreference = 'Continue'
 
-foreach ($name in 'SecMonDaemon', 'SecMonPatrol') {
+foreach ($name in 'TripFlareDaemon', 'TripFlarePatrol') {
     schtasks.exe /query /tn $name 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
         schtasks.exe /delete /tn $name /f | Out-Host
@@ -14,4 +14,4 @@ foreach ($name in 'SecMonDaemon', 'SecMonPatrol') {
         Write-Host "Task $name not present, skipping."
     }
 }
-Write-Host "SecMon scheduled tasks removed."
+Write-Host "TripFlare scheduled tasks removed."

@@ -3,8 +3,8 @@ config.json
 state.json
 alerts.jsonl
 URGENT.txt
-secmon.log
-secmon.log.1
+tripflare.log
+tripflare.log.1
 reviews/
 quarantine/
 sig_paths.txt

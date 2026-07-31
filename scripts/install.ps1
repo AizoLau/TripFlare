@@ -1,9 +1,9 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Registers the SecMon scheduled tasks:
-    SecMonDaemon - runs secmon.py (pythonw, windowless) at user logon
-    SecMonPatrol - runs "secmon.py patrol-tick" every 30 minutes
+  Registers the TripFlare scheduled tasks:
+    TripFlareDaemon - runs tripflare.py (pythonw, windowless) at user logon
+    TripFlarePatrol - runs "tripflare.py patrol-tick" every 30 minutes
                    (it is a no-op unless ai.mode = "patrol" in config.json)
 #>
 [CmdletBinding()]
@@ -13,8 +13,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root   = Split-Path -Parent $PSScriptRoot
-$secmon = Join-Path $root 'secmon.py'
-if (-not (Test-Path $secmon)) { throw "secmon.py not found at $secmon" }
+$tripflare = Join-Path $root 'tripflare.py'
+if (-not (Test-Path $tripflare)) { throw "tripflare.py not found at $tripflare" }
 
 # Resolve pythonw.exe (windowless interpreter for background running).
 if (-not $PythonW) {
@@ -34,17 +34,17 @@ if (-not $PythonW) {
 }
 if (-not $PythonW) { throw 'pythonw.exe not found; pass -PythonW <path>' }
 
-Write-Host "SecMon : $secmon"
+Write-Host "TripFlare : $tripflare"
 Write-Host "PythonW: $PythonW"
 
-$daemonArgs = ('"{0}" "{1}"' -f $PythonW, $secmon)
-$patrolArgs = ('"{0}" "{1}" patrol-tick' -f $PythonW, $secmon)
+$daemonArgs = ('"{0}" "{1}"' -f $PythonW, $tripflare)
+$patrolArgs = ('"{0}" "{1}" patrol-tick' -f $PythonW, $tripflare)
 
-schtasks.exe /create /tn 'SecMonDaemon' /tr $daemonArgs /sc ONLOGON /f | Out-Host
-schtasks.exe /create /tn 'SecMonPatrol' /tr $patrolArgs /sc MINUTE /mo 30 /f | Out-Host
+schtasks.exe /create /tn 'TripFlareDaemon' /tr $daemonArgs /sc ONLOGON /f | Out-Host
+schtasks.exe /create /tn 'TripFlarePatrol' /tr $patrolArgs /sc MINUTE /mo 30 /f | Out-Host
 
 Write-Host "`nRegistered tasks:"
-schtasks.exe /query /tn 'SecMonDaemon' /fo list | Out-Host
-schtasks.exe /query /tn 'SecMonPatrol' /fo list | Out-Host
+schtasks.exe /query /tn 'TripFlareDaemon' /fo list | Out-Host
+schtasks.exe /query /tn 'TripFlarePatrol' /fo list | Out-Host
 Write-Host "Done. The daemon starts at next logon; start it now with:"
-Write-Host "  schtasks /run /tn SecMonDaemon"
+Write-Host "  schtasks /run /tn TripFlareDaemon"

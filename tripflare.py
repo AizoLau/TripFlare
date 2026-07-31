@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SecMon - lightweight Windows anomaly monitor with three-tier AI review.
+"""TripFlare - lightweight Windows anomaly monitor with three-tier AI review.
 
 Single file, standard library only, Python 3.8+.
 
 Usage:
-    secmon.py --init          Build the baseline snapshot (no alerts).
-    secmon.py                 Daemon loop (scan every interval_seconds).
-    secmon.py digest          Print alerts since the last digest.
-    secmon.py ai-review       Send recent alerts to the AI backend once.
-    secmon.py allow <target>  Allowlist a path or a signer substring.
-    secmon.py status          Show configuration and runtime statistics.
-    secmon.py patrol-tick     Scheduled-task entry for AI patrol mode.
-    secmon.py --bench         Run one timed round and print stage timings.
+    tripflare.py --init          Build the baseline snapshot (no alerts).
+    tripflare.py                 Daemon loop (scan every interval_seconds).
+    tripflare.py digest          Print alerts since the last digest.
+    tripflare.py ai-review       Send recent alerts to the AI backend once.
+    tripflare.py allow <target>  Allowlist a path or a signer substring.
+    tripflare.py status          Show configuration and runtime statistics.
+    tripflare.py patrol-tick     Scheduled-task entry for AI patrol mode.
+    tripflare.py --bench         Run one timed round and print stage timings.
 
-Runtime data lives in %LOCALAPPDATA%\\SecMon\\ (state.json, alerts.jsonl,
-reviews\\, URGENT.txt, secmon.log).
+Runtime data lives in %LOCALAPPDATA%\\TripFlare\\ (state.json, alerts.jsonl,
+reviews\\, URGENT.txt, tripflare.log).
 """
 from __future__ import annotations
 
@@ -45,12 +45,12 @@ NO_WINDOW_KW = {"creationflags": 0x08000000} if os.name == "nt" else {}
 # --------------------------------------------------------------------------
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get("SECMON_DATA_DIR") or os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "SecMon")
+DATA_DIR = os.environ.get("TRIPFLARE_DATA_DIR") or os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "TripFlare")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 ALERTS_PATH = os.path.join(DATA_DIR, "alerts.jsonl")
 URGENT_PATH = os.path.join(DATA_DIR, "URGENT.txt")
-LOG_PATH = os.path.join(DATA_DIR, "secmon.log")
+LOG_PATH = os.path.join(DATA_DIR, "tripflare.log")
 REVIEWS_DIR = os.path.join(DATA_DIR, "reviews")
 PROMPTS_DIR = os.path.join(SCRIPT_DIR, "prompts")
 
@@ -89,7 +89,7 @@ IFEO_KEY = (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
             r"\Image File Execution Options")
 SERVICES_KEY = r"HKLM\SYSTEM\CurrentControlSet\Services"
 
-# Processes that must never trigger self-alerts (SecMon itself, its AI
+# Processes that must never trigger self-alerts (TripFlare itself, its AI
 # backend, and the helper tools it spawns every round).
 OWN_PROCESS_NAMES = {"python.exe", "pythonw.exe", "python3.exe", "kimi.exe"}
 HELPER_PROCESS_NAMES = {
@@ -382,14 +382,14 @@ def console_python():
 def write_desktop_bat():
     """(Re)create the one-click AI review launcher on the user desktop."""
     bat_path = os.path.join(os.path.expanduser("~"), "Desktop",
-                            "SecMon-运行AI研判.bat")
+                            "TripFlare-运行AI研判.bat")
     content = (
         "chcp 65001 >nul\r\n"
         "@echo off\r\n"
-        "title SecMon AI Review\r\n"
+        "title TripFlare AI Review\r\n"
         "\"%s\" \"%s\" ai-review\r\n"
         "echo.\r\n"
-        "echo Report saved under %%LOCALAPPDATA%%\\SecMon\\reviews\\\r\n"
+        "echo Report saved under %%LOCALAPPDATA%%\\TripFlare\\reviews\\\r\n"
         "pause\r\n"
     ) % (console_python(), os.path.abspath(__file__))
     try:
@@ -579,11 +579,11 @@ def is_reparse_point(path):
 
 def desktop_bat_path():
     return norm(os.path.join(os.path.expanduser("~"), "Desktop",
-                             "SecMon-运行AI研判.bat"))
+                             "TripFlare-运行AI研判.bat"))
 
 
 def OWN_FILES():
-    """Artifacts SecMon creates itself; never alert on them."""
+    """Artifacts TripFlare creates itself; never alert on them."""
     return {desktop_bat_path()}
 
 
@@ -946,7 +946,7 @@ def snapshot_processes():
 
 
 def is_own_process(path, name):
-    """Built-in whitelist: SecMon itself, its interpreters and AI backend."""
+    """Built-in whitelist: TripFlare itself, its interpreters and AI backend."""
     low = norm_lower(path)
     base = (name or os.path.basename(path)).lower()
     if base in OWN_PROCESS_NAMES:
@@ -1101,7 +1101,7 @@ def escalate_high(ev, cfg):
     append_urgent("\n".join(lines))
     mode = cfg["ai"].get("mode", "recommend")
     if cfg.get("notify", {}).get("balloon", True):
-        notify_balloon("SecMon high alert",
+        notify_balloon("TripFlare high alert",
                        "%s (%s) score=%d" % (os.path.basename(ev["path"]),
                                              ev["type"], ev["score"]))
     if mode != "patrol" and cfg.get("notify", {}).get("desktop_bat", True):
@@ -1113,7 +1113,7 @@ def escalate_high(ev, cfg):
 
 def detect_backend():
     """Locate a CLI backend that maps '-p <prompt>' to text on stdout."""
-    env = os.environ.get("SECMON_AI_BACKEND")
+    env = os.environ.get("TRIPFLARE_AI_BACKEND")
     if env and os.path.exists(env):
         return env
     candidates = [
@@ -1248,7 +1248,7 @@ def patrol_tick(cfg, trigger="scheduled", state=None):
     if err:
         log("patrol AI call failed: %s" % err)
         return False, "AI call failed: %s" % err
-    header = ("# SecMon patrol report (%s trigger)\n\n- time: %s\n"
+    header = ("# TripFlare patrol report (%s trigger)\n\n- time: %s\n"
               "- alerts supplied: %d\n\n" % (trigger, now_iso(), len(alerts)))
     path = save_review("patrol", header + report + "\n")
     st["ai"]["calls_today"] = st["ai"].get("calls_today", 0) + 1
@@ -1263,7 +1263,7 @@ def patrol_tick(cfg, trigger="scheduled", state=None):
                       "AI patrol found a HIGH risk verdict.\n"
                       "Report: %s\n\n%s" % (now_iso(), path, report[:2000]))
         if cfg.get("notify", {}).get("balloon", True):
-            notify_balloon("SecMon patrol", "AI patrol verdict: HIGH risk. "
+            notify_balloon("TripFlare patrol", "AI patrol verdict: HIGH risk. "
                            "See reviews\\ and URGENT.txt")
     return True, "patrol completed, report: %s" % path
 
@@ -1315,7 +1315,7 @@ def run_round(state, cfg, heavy=False, timings=None):
         timings["total"] = state["last_round_seconds"]
     if new_high and cfg.get("ai", {}).get("mode") == "patrol":
         threading.Thread(target=_immediate_patrol_async, args=(cfg,),
-                         daemon=True, name="secmon-patrol").start()
+                         daemon=True, name="tripflare-patrol").start()
     return events
 
 
@@ -1349,7 +1349,7 @@ def cmd_init(cfg):
             save_config(cfg, cfg_path)
         except OSError as exc:
             log("config seed write failed: %s" % exc)
-    print("SecMon baseline created.")
+    print("TripFlare baseline created.")
     print("  data dir : %s" % DATA_DIR)
     print("  config   : %s" % cfg_path)
     print("  files    : %d watched executables/scripts" % len(state["files"]))
@@ -1372,7 +1372,7 @@ def cmd_daemon(cfg):
     heavy_every = max(1, int(cfg.get("heavy_interval_rounds", 5)))
     log("daemon started (interval=%ds, heavy every %d rounds, ai.mode=%s)"
         % (interval, heavy_every, cfg["ai"].get("mode")))
-    print("SecMon daemon running. interval=%ds, data=%s" % (interval, DATA_DIR))
+    print("TripFlare daemon running. interval=%ds, data=%s" % (interval, DATA_DIR))
     print("Press Ctrl+C to stop.")
     try:
         while True:
@@ -1386,7 +1386,7 @@ def cmd_daemon(cfg):
             time.sleep(interval)
     except KeyboardInterrupt:
         log("daemon stopped by user")
-        print("\nSecMon daemon stopped.")
+        print("\nTripFlare daemon stopped.")
         return 0
 
 
@@ -1394,7 +1394,7 @@ def cmd_digest(cfg):
     """Print (and mark as read) alerts since the last digest."""
     state = load_state()
     if state is None:
-        print("No baseline yet. Run: secmon.py --init")
+        print("No baseline yet. Run: tripflare.py --init")
         return 1
     since = state["ai"].get("last_digest", 0)
     alerts = read_alerts(since_epoch=since)
@@ -1405,7 +1405,7 @@ def cmd_digest(cfg):
     alerts.sort(key=lambda a: (order.get(a.get("level"), 3),
                                a.get("epoch", 0)))
     counts = {"high": 0, "warn": 0, "info": 0}
-    print("SecMon digest - %d new alert(s)\n" % len(alerts))
+    print("TripFlare digest - %d new alert(s)\n" % len(alerts))
     for a in alerts:
         counts[a.get("level", "info")] = counts.get(a.get("level", "info"), 0) + 1
         print("[%s] score=%s %s %s" % (a.get("level", "?").upper(),
@@ -1424,7 +1424,7 @@ def cmd_ai_review(cfg, max_alerts=None):
     """One-shot AI review of pending warn/high alerts (user-invoked)."""
     state = load_state()
     if state is None:
-        print("No baseline yet. Run: secmon.py --init")
+        print("No baseline yet. Run: tripflare.py --init")
         return 1
     since = state["ai"].get("last_review", 0) or (time.time() - 86400)
     cap = max_alerts or int(cfg["ai"].get("review_max_alerts", 20))
@@ -1437,7 +1437,7 @@ def cmd_ai_review(cfg, max_alerts=None):
     if err:
         print("AI review failed: %s" % err)
         return 1
-    header = ("# SecMon AI review\n\n- time: %s\n- alerts supplied: %d\n\n"
+    header = ("# TripFlare AI review\n\n- time: %s\n- alerts supplied: %d\n\n"
               % (now_iso(), len(alerts)))
     path = save_review("review", header + report + "\n")
     state["ai"]["last_review"] = time.time()
@@ -1478,13 +1478,13 @@ def cmd_allow(cfg, target):
 
 def cmd_status(cfg):
     state = load_state()
-    print("SecMon %s" % VERSION)
+    print("TripFlare %s" % VERSION)
     print("  data dir   : %s" % DATA_DIR)
     print("  config     : %s" % (cfg.get("_config_path") or "(built-in defaults)"))
     print("  ai.mode    : %s" % cfg["ai"].get("mode"))
     print("  ai.backend : %s" % (cfg["ai"].get("backend_path") or "auto"))
     if state is None:
-        print("  baseline   : MISSING - run secmon.py --init")
+        print("  baseline   : MISSING - run tripflare.py --init")
         return 1
     print("  baseline   : created %s" % state.get("created"))
     print("  rounds     : %d (last round %.2fs)" % (
@@ -1510,7 +1510,7 @@ def cmd_bench(cfg):
     """Run one full (heavy) round and print per-stage timings."""
     state = load_state()
     if state is None:
-        print("No baseline yet. Run: secmon.py --init")
+        print("No baseline yet. Run: tripflare.py --init")
         return 1
     timings = {}
     events = run_round(state, cfg, heavy=True, timings=timings)
@@ -1553,7 +1553,7 @@ def main(argv):
         return cmd_ai_review(cfg, max_alerts=max_alerts)
     if args and args[0] == "allow":
         if len(args) < 2:
-            print("usage: secmon.py allow <path-or-signer>")
+            print("usage: tripflare.py allow <path-or-signer>")
             return 2
         return cmd_allow(cfg, " ".join(args[1:]))
     if args and args[0] == "status":

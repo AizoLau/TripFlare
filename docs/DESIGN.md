@@ -1,6 +1,6 @@
-# SecMon design notes
+# TripFlare design notes
 
-## Why SecMon exists (threat model)
+## Why TripFlare exists (threat model)
 
 Real-world crypto-theft and infostealer incidents on Windows overwhelmingly
 share the same post-exploitation shape: a payload is dropped into a
@@ -12,7 +12,7 @@ that grabbed exchange API keys and wallet files in the wild (the endless
 stream of "my wallet was drained after I ran X" reports) almost all walked
 through exactly this door.
 
-Full antivirus looks for *known bad* content. SecMon takes the tripwire
+Full antivirus looks for *known bad* content. TripFlare takes the tripwire
 position instead: it assumes a clean baseline and screams when the
 *environment* changes in ways that match the intrusion shape above. It
 does not scan file contents, so it cannot be evaded by packers — but it
@@ -48,21 +48,21 @@ only metadata — so `--init` stays fast.
 
 `>= 7` = **high**, `3-6` = **warn**, `< 3` = **info**. High alerts append
 to `URGENT.txt`, pop a balloon notification, and (outside patrol mode)
-drop `SecMon-运行AI研判.bat` on the desktop for one-click AI review.
+drop `TripFlare-运行AI研判.bat` on the desktop for one-click AI review.
 
 The default signer allowlist is intentionally **empty**: a signed binary
 that appears in a drop zone with a random name (a classic renamed-lolbin
 move) must still reach the high threshold. Users allowlist the signers
-they trust with `secmon.py allow "CN=Some Vendor"`.
+they trust with `tripflare.py allow "CN=Some Vendor"`.
 
 ## Three AI modes
 
 1. **recommend** (default): zero tokens unless the user double-clicks the
-   desktop bat after a high alert. The bat runs `secmon.py ai-review`,
+   desktop bat after a high alert. The bat runs `tripflare.py ai-review`,
    which sends pending warn/high alerts to the AI backend once.
 2. **patrol**: the daemon triggers an immediate patrol on new high alerts
    (10-minute cooldown, alerts merge inside the window) and the
-   `SecMonPatrol` scheduled task triggers a routine patrol every
+   `TripFlarePatrol` scheduled task triggers a routine patrol every
    `patrol_interval_minutes` (default 30). A daily circuit breaker
    (`max_calls_per_day`, default 20) caps quota burn. The patrol agent is
    read-only by prompt guardrail; auto-quarantine is off unless explicitly
@@ -92,6 +92,6 @@ are in the README.
 ## Self-protection
 
 `pythonw.exe`/`python.exe`, the AI backend (`kimi.exe`), everything under
-the install and data directories, and the helper tools SecMon spawns each
-round (`powershell`, `reg`, `schtasks`, ...) are whitelisted so SecMon
+the install and data directories, and the helper tools TripFlare spawns each
+round (`powershell`, `reg`, `schtasks`, ...) are whitelisted so TripFlare
 never alerts on itself.

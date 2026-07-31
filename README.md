@@ -1,4 +1,4 @@
-# SecMon
+# TripFlare
 
 Lightweight Windows anomaly monitor (tripwire) with three-tier AI review.
 Single-file Python, standard library only, zero tokens by default.
@@ -7,7 +7,7 @@ Single-file Python, standard library only, zero tokens by default.
 
 ## What it does
 
-SecMon snapshots the places malware actually touches first — drop zones
+TripFlare snapshots the places malware actually touches first — drop zones
 (Downloads / Temp / Desktop / AppData / Startup folders), autostart registry
 keys (`Run`, `RunOnce`, Winlogon, `StartupApproved`, IFEO debuggers,
 services), scheduled tasks, and processes launched from risky locations —
@@ -23,9 +23,9 @@ and threat model: [docs/DESIGN.md](docs/DESIGN.md).
 ## 30-second quickstart
 
 ```bat
-git clone <repo> secmon && cd secmon
-python secmon.py --init        :: build the baseline (no alerts)
-python secmon.py               :: run the daemon (Ctrl+C to stop)
+git clone <repo> tripflare && cd tripflare
+python tripflare.py --init        :: build the baseline (no alerts)
+python tripflare.py               :: run the daemon (Ctrl+C to stop)
 ```
 
 Other commands: `digest` (unread alerts), `ai-review [--max N]` (one-shot
@@ -40,8 +40,8 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 ```
 
-`install.ps1` registers two scheduled tasks: `SecMonDaemon` (pythonw,
-windowless, at logon) and `SecMonPatrol` (`patrol-tick` every 30 min — a
+`install.ps1` registers two scheduled tasks: `TripFlareDaemon` (pythonw,
+windowless, at logon) and `TripFlarePatrol` (`patrol-tick` every 30 min — a
 complete no-op unless `ai.mode` is `patrol`).
 
 ## Three AI modes
@@ -79,19 +79,19 @@ per round and a handful of `reg query` calls.
 
 ## Runtime data
 
-`%LOCALAPPDATA%\SecMon\` — `state.json` (baseline), `alerts.jsonl`,
-`reviews\` (AI reports), `URGENT.txt` (high alerts), `secmon.log`.
-Config: `config.json` next to `secmon.py` (seeded from
+`%LOCALAPPDATA%\TripFlare\` — `state.json` (baseline), `alerts.jsonl`,
+`reviews\` (AI reports), `URGENT.txt` (high alerts), `tripflare.log`.
+Config: `config.json` next to `tripflare.py` (seeded from
 `config.default.json` on `--init`).
 
 ## Blind spots (read before trusting it)
 
-SecMon is a tripwire, **not antivirus**: no rootkit, fileless, or in-memory
+TripFlare is a tripwire, **not antivirus**: no rootkit, fileless, or in-memory
 detection; a baseline taken after compromise blesses the malware; process
 watching is path-first-seen, not behavioral. It complements periodic full
 scans (e.g. Emsisoft Emergency Kit) and a real AV. Patrol mode costs real
 AI quota (circuit breaker included). The AI is read-only unless you
-explicitly enable quarantine. SecMon never alerts on itself: `pythonw.exe`,
+explicitly enable quarantine. TripFlare never alerts on itself: `pythonw.exe`,
 the AI backend, and everything under the install/data directories are
 whitelisted.
 
@@ -103,7 +103,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## 中文说明
 
-SecMon 是一个轻量级 Windows 异常监控（绊线式）工具：对首次入侵最常
+TripFlare 是一个轻量级 Windows 异常监控（绊线式）工具：对首次入侵最常
 触碰的位置建立基线（下载/临时/桌面/AppData/启动目录、Run 键、
 Winlogon、StartupApproved、IFEO、服务、计划任务、高危位置新进程），
 用本地启发式规则打分（无签名 +3、未知签名者 +2、随机名 +3、伪装运
@@ -115,7 +115,7 @@ Winlogon、StartupApproved、IFEO、服务、计划任务、高危位置新进�
 断，AI 默认只读）、`off`（纯本地）。AI 后端默认自动探测 kimi.exe，
 可换任何"收 prompt 出文本"的命令行工具。
 
-上手：`python secmon.py --init` 建基线 → `python secmon.py` 跑守护；
+上手：`python tripflare.py --init` 建基线 → `python tripflare.py` 跑守护；
 `scripts\install.ps1` 可注册登录自启与定时巡逻两个计划任务，
 `uninstall.ps1` 回滚。实测每轮约 0.9–1.8 秒、内存约 24MB，平均
 CPU 远低于 1%。

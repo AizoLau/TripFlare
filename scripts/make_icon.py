@@ -2,19 +2,19 @@
 # -*- coding: utf-8 -*-
 """Generate tripflare.ico (32x32 + 16x16, 32bpp BGRA) with pure stdlib.
 
-Design: dark rounded-square background with an orange/yellow flare spark
-(vertical + horizontal rays, bright core, two small sparks). No imaging
-libraries: the ICO container and the DIB payloads are written byte by byte.
+Design: flat, geometric, tool-like - dark blue-gray (#1F2937) rounded
+square with a plain near-white letter "T" (TripFlare wordmark) and one
+small orange accent dot. No gradients, no starbursts, no sparks: it must
+stay recognizable at 16x16.
 """
 import os
 import struct
 
 SIZES = (32, 16)
 
-BG = (34, 40, 54, 255)        # dark slate background (R, G, B, A)
-RAY = (255, 150, 40, 255)     # orange flare rays
-CORE = (255, 224, 138, 255)   # bright yellow core
-SPARK = (255, 190, 80, 255)   # small sparks
+BG = (31, 41, 55, 255)        # #1F2937 dark blue-gray background (RGBA)
+LETTER = (242, 244, 248, 255)  # near-white letter T
+DOT = (255, 150, 40, 255)      # single orange accent dot
 TRANSPARENT = (0, 0, 0, 0)
 
 
@@ -36,30 +36,24 @@ def paint(size):
         for x in range(size):
             if inside_rounded_rect(x, y, size, size, radius):
                 px[y][x] = BG
-    cx, cy = int(round(16 * s)), int(round(15 * s))
-    # Rays: a 4-point star around the centre, tapering with distance.
-    v_len, h_len = int(round(9 * s)), int(round(6 * s))
-    for dy in range(-v_len, v_len + 1):
-        half = max(0, int(round(1.6 * s)) - abs(dy) // max(1, int(4 * s)))
-        for dx in range(-half, half + 1):
-            if 0 <= cx + dx < size and 0 <= cy + dy < size:
-                px[cy + dy][cx + dx] = RAY
-    for dx in range(-h_len, h_len + 1):
-        half = max(0, int(round(1.2 * s)) - abs(dx) // max(1, int(4 * s)))
-        for dy in range(-half, half + 1):
-            if 0 <= cx + dx < size and 0 <= cy + dy < size:
-                px[cy + dy][cx + dx] = RAY
-    # Bright core circle.
-    core_r = max(1.5, 3 * s)
+    # Letter T: horizontal bar on top, vertical stem below, both 2-4 px.
+    th = max(2, int(round(4 * s)))
+    top = int(round(9 * s))
+    x0, x1 = int(round(9 * s)), int(round(23 * s))
+    for y in range(top, top + th):
+        for x in range(x0, x1):
+            px[y][x] = LETTER
+    cx = int(round(16 * s))
+    for y in range(top, int(round(24 * s))):
+        for x in range(cx - th // 2, cx - th // 2 + th):
+            px[y][x] = LETTER
+    # One small orange accent dot, bottom-right of the T.
+    dx, dy = int(round(24 * s)), int(round(24 * s))
+    dot_r = max(1.5, 2 * s)
     for y in range(size):
         for x in range(size):
-            if (x - cx) ** 2 + (y - cy) ** 2 <= core_r * core_r:
-                px[y][x] = CORE
-    # Two tiny sparks.
-    for sx, sy in ((10, 9), (23, 20)):
-        sx, sy = int(round(sx * s)), int(round(sy * s))
-        if 0 <= sx < size and 0 <= sy < size:
-            px[sy][sx] = SPARK
+            if (x - dx) ** 2 + (y - dy) ** 2 <= dot_r * dot_r:
+                px[y][x] = DOT
     return px
 
 

@@ -199,18 +199,140 @@ class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+class MENUITEMINFOW(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("fMask", ctypes.c_uint),
+                ("fType", ctypes.c_uint), ("fState", ctypes.c_uint),
+                ("wID", ctypes.c_uint), ("hSubMenu", wt.HANDLE),
+                ("hbmpChecked", wt.HANDLE), ("hbmpUnchecked", wt.HANDLE),
+                ("dwItemData", ctypes.c_void_p), ("dwTypeData", wt.LPCWSTR),
+                ("cch", ctypes.c_uint), ("hbmpItem", wt.HANDLE)]
+
+
+MIIM_STRING, MIIM_ID, MIIM_FTYPE = 0x0040, 0x0002, 0x0100
+MFT_STRING, MFT_SEPARATOR = 0x0000, 0x0800
+MF_BYPOSITION = 0x0400
+
+# Menu layout shared by the tray popup and --menutest. None = separator.
+MENU_ITEMS = [
+    (CMD_CONSOLE, "打开控制台"),
+    (CMD_REVIEW, "立即AI研判"),
+    None,
+    (CMD_START, "启动守护"),
+    (CMD_STOP, "停止守护"),
+    None,
+    (CMD_DATADIR, "打开数据目录"),
+    (CMD_QUIT, "退出托盘"),
+]
+
+# Full prototypes for every Win32 call used below: 64-bit handles must not
+# fall back to ctypes' 32-bit defaults, and LPCWSTR must receive real str.
 shell32.Shell_NotifyIconW.argtypes = [ctypes.c_ulong,
                                       ctypes.POINTER(NOTIFYICONDATAW)]
 shell32.Shell_NotifyIconW.restype = wt.BOOL
 user32.LoadImageW.restype = wt.HICON
 user32.LoadImageW.argtypes = [wt.HINSTANCE, wt.LPCWSTR, ctypes.c_uint,
                               ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+user32.LoadIconW.restype = wt.HICON
+user32.LoadIconW.argtypes = [wt.HINSTANCE, wt.LPCWSTR]
+user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+user32.RegisterClassW.restype = wt.ATOM
+user32.CreateWindowExW.restype = wt.HWND
+user32.CreateWindowExW.argtypes = [ctypes.c_ulong, wt.LPCWSTR, wt.LPCWSTR,
+                                   ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wt.HWND,
+                                   wt.HANDLE, wt.HINSTANCE, ctypes.c_void_p]
+user32.DefWindowProcW.restype = ctypes.c_long
+user32.DefWindowProcW.argtypes = [wt.HWND, ctypes.c_uint, wt.WPARAM,
+                                  wt.LPARAM]
+user32.DestroyWindow.argtypes = [wt.HWND]
+user32.DestroyWindow.restype = wt.BOOL
+user32.SetTimer.argtypes = [wt.HWND, ctypes.c_void_p, ctypes.c_uint,
+                            ctypes.c_void_p]
+user32.SetTimer.restype = ctypes.c_void_p
+user32.KillTimer.argtypes = [wt.HWND, ctypes.c_void_p]
+user32.KillTimer.restype = wt.BOOL
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.PostMessageW.argtypes = [wt.HWND, ctypes.c_uint, wt.WPARAM, wt.LPARAM]
+user32.PostMessageW.restype = wt.BOOL
+user32.GetMessageW.argtypes = [ctypes.POINTER(wt.MSG), wt.HWND,
+                               ctypes.c_uint, ctypes.c_uint]
+user32.GetMessageW.restype = ctypes.c_int
+user32.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
+user32.TranslateMessage.restype = wt.BOOL
+user32.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+user32.DispatchMessageW.restype = ctypes.c_long
+user32.SetForegroundWindow.argtypes = [wt.HWND]
+user32.SetForegroundWindow.restype = wt.BOOL
+user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+user32.GetCursorPos.restype = wt.BOOL
 user32.CreatePopupMenu.restype = wt.HANDLE
+user32.CreatePopupMenu.argtypes = []
+user32.InsertMenuItemW.argtypes = [wt.HANDLE, ctypes.c_uint, wt.BOOL,
+                                   ctypes.POINTER(MENUITEMINFOW)]
+user32.InsertMenuItemW.restype = wt.BOOL
+user32.GetMenuItemCount.argtypes = [wt.HANDLE]
+user32.GetMenuItemCount.restype = ctypes.c_int
+user32.GetMenuStringW.argtypes = [wt.HANDLE, ctypes.c_uint, wt.LPWSTR,
+                                  ctypes.c_int, ctypes.c_uint]
+user32.GetMenuStringW.restype = ctypes.c_int
+user32.GetMenuItemInfoW.argtypes = [wt.HANDLE, ctypes.c_uint, wt.BOOL,
+                                    ctypes.POINTER(MENUITEMINFOW)]
+user32.GetMenuItemInfoW.restype = wt.BOOL
 user32.TrackPopupMenu.argtypes = [wt.HANDLE, ctypes.c_uint, ctypes.c_int,
                                   ctypes.c_int, ctypes.c_int, wt.HWND,
                                   ctypes.c_void_p]
+user32.TrackPopupMenu.restype = ctypes.c_int
+user32.DestroyMenu.argtypes = [wt.HANDLE]
+user32.DestroyMenu.restype = wt.BOOL
 user32.RegisterWindowMessageW.argtypes = [wt.LPCWSTR]
 user32.RegisterWindowMessageW.restype = ctypes.c_uint
+kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wt.HINSTANCE
+kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.LPCWSTR]
+kernel32.CreateMutexW.restype = wt.HANDLE
+kernel32.GetLastError.restype = ctypes.c_ulong
+
+
+def build_menu():
+    """Create the tray popup menu via InsertMenuItemW/MENUITEMINFOW."""
+    menu = user32.CreatePopupMenu()
+    for pos, item in enumerate(MENU_ITEMS):
+        mii = MENUITEMINFOW()
+        mii.cbSize = ctypes.sizeof(MENUITEMINFOW)
+        if item is None:
+            mii.fMask = MIIM_FTYPE
+            mii.fType = MFT_SEPARATOR
+        else:
+            cmd, text = item
+            mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING
+            mii.fType = MFT_STRING
+            mii.wID = cmd
+            mii.dwTypeData = text
+        if not user32.InsertMenuItemW(menu, pos, True, ctypes.byref(mii)):
+            log("InsertMenuItemW failed at pos %d, err=%d"
+                % (pos, kernel32.GetLastError()))
+    return menu
+
+
+def menutest():
+    """Headless menu self-check: read every entry back with GetMenuStringW."""
+    menu = build_menu()
+    count = user32.GetMenuItemCount(menu)
+    print("menutest: item count = %d (expect 8)" % count)
+    for pos in range(count):
+        mii = MENUITEMINFOW()
+        mii.cbSize = ctypes.sizeof(MENUITEMINFOW)
+        mii.fMask = MIIM_FTYPE | MIIM_ID
+        user32.GetMenuItemInfoW(menu, pos, True, ctypes.byref(mii))
+        buf = ctypes.create_unicode_buffer(128)
+        user32.GetMenuStringW(menu, pos, buf, 128, MF_BYPOSITION)
+        if mii.fType & MFT_SEPARATOR:
+            print("menutest: [%d] <separator>" % pos)
+        else:
+            print("menutest: [%d] id=%d text=%s" % (pos, mii.wID, buf.value))
+    user32.DestroyMenu(menu)
+    print("menutest: OK")
+    return 0
 
 
 class TrayApp:
@@ -331,20 +453,7 @@ class TrayApp:
     # ---------------- context menu ----------------
 
     def _show_menu(self):
-        menu = user32.CreatePopupMenu()
-        for cmd, text in (
-                (CMD_CONSOLE, "打开控制台"),
-                (CMD_REVIEW, "立即AI研判"),
-                (None, None),
-                (CMD_START, "启动守护"),
-                (CMD_STOP, "停止守护"),
-                (None, None),
-                (CMD_DATADIR, "打开数据目录"),
-                (CMD_QUIT, "退出托盘")):
-            if cmd is None:
-                user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            else:
-                user32.AppendMenuW(menu, MF_STRING, cmd, text)
+        menu = build_menu()
         pt = POINT()
         user32.GetCursorPos(ctypes.byref(pt))
         user32.SetForegroundWindow(self.hwnd)
@@ -420,6 +529,8 @@ def already_running():
 
 
 def main():
+    if "--menutest" in sys.argv:
+        return menutest()
     os.makedirs(DATA_DIR, exist_ok=True)
     if already_running():
         log("tray already running, second instance exits")

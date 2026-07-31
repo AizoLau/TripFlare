@@ -34,7 +34,11 @@ import time
 import traceback
 from datetime import datetime
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
+
+# Prevent brief console windows from flashing when the windowless daemon
+# (pythonw) spawns console subprocesses (reg / schtasks / powershell / AI CLI).
+NO_WINDOW_KW = {"creationflags": 0x08000000} if os.name == "nt" else {}
 
 # --------------------------------------------------------------------------
 # Paths and constants
@@ -166,7 +170,8 @@ def log(msg):
 def run_cmd(args, timeout=60, encoding="mbcs"):
     """Run a command, return stdout decoded (never raises)."""
     try:
-        proc = subprocess.run(args, capture_output=True, timeout=timeout)
+        proc = subprocess.run(args, capture_output=True, timeout=timeout,
+                              **NO_WINDOW_KW)
         return proc.returncode, proc.stdout.decode(encoding, "replace")
     except (OSError, subprocess.TimeoutExpired) as exc:
         return -1, str(exc)
@@ -355,7 +360,8 @@ def notify_balloon(title, message):
         subprocess.Popen(
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
              "-Command", ps],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **NO_WINDOW_KW)
     except OSError as exc:
         log("balloon notification failed silently: %s" % exc)
 
@@ -1133,7 +1139,8 @@ def call_ai(cfg, prompt):
                         for a in ai.get("backend_args", ["-p", "{prompt}"])]
     try:
         proc = subprocess.run(args, capture_output=True,
-                              timeout=int(ai.get("timeout_seconds", 600)))
+                              timeout=int(ai.get("timeout_seconds", 600)),
+                              **NO_WINDOW_KW)
         out = proc.stdout.decode("utf-8", "replace")
         err = proc.stderr.decode("utf-8", "replace")
         if proc.returncode != 0:

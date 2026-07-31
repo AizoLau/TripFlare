@@ -41,8 +41,8 @@
   },
   "notify": {
     "balloon": true,
-    "_balloon": "Windows balloon notification on high alerts (non-blocking PowerShell NotifyIcon; silently skipped if it fails).",
-    "desktop_bat": true,
-    "_desktop_bat": "On high alerts (recommend/off modes) drop 'TripFlare-运行AI研判.bat' on the desktop for one-click AI review."
+    "_balloon": "Fallback balloon on high alerts for tray-less users (non-blocking PowerShell NotifyIcon). Set false when tripflare_tray.pyw owns notifications (this machine: tray installed).",
+    "desktop_bat": false,
+    "_desktop_bat": "DEPRECATED - the tray agent replaced the desktop bat. When true, high alerts (recommend/off modes) still drop 'TripFlare-运行AI研判.bat' on the desktop."
   }
 }

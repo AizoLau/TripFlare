@@ -124,7 +124,7 @@ DEFAULT_CONFIG = {
         "patrol_immediate_cooldown_minutes": 10,
         "patrol": {"allow_auto_quarantine": False},
     },
-    "notify": {"balloon": True, "desktop_bat": True},
+    "notify": {"balloon": True, "desktop_bat": False},
 }
 
 STATE_LOCK = threading.Lock()
@@ -1096,7 +1096,12 @@ def alert_key(ev):
 
 
 def escalate_high(ev, cfg):
-    """High-severity actions: URGENT.txt, balloon tip, desktop .bat."""
+    """High-severity actions: URGENT.txt plus optional fallbacks.
+
+    The system tray agent owns user notification by default. The classic
+    PowerShell balloon and the deprecated desktop .bat only fire when
+    explicitly enabled in config (notify.balloon / notify.desktop_bat).
+    """
     lines = [
         "================ %s HIGH score=%d ================" % (
             now_iso(), ev["score"]),
@@ -1114,7 +1119,7 @@ def escalate_high(ev, cfg):
         notify_balloon("TripFlare high alert",
                        "%s (%s) score=%d" % (os.path.basename(ev["path"]),
                                              ev["type"], ev["score"]))
-    if mode != "patrol" and cfg.get("notify", {}).get("desktop_bat", True):
+    if mode != "patrol" and cfg.get("notify", {}).get("desktop_bat", False):
         write_desktop_bat()
 
 # --------------------------------------------------------------------------

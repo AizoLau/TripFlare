@@ -47,9 +47,11 @@ only metadata — so `--init` stays fast.
 | IFEO debugger primitive | +2 |
 
 `>= 7` = **high**, `3-6` = **warn**, `< 3` = **info**. High alerts append
-to `URGENT.txt`, pop a balloon notification, and (outside patrol mode)
-drop `TripFlare-运行AI研判.bat` on the desktop — one click opens the
-console UI (`tripflare_ui.pyw --alerts`) on its alerts page.
+to `URGENT.txt` and are surfaced by the system tray agent
+(`tripflare_tray.pyw`: persistent icon + balloon + right-click menu).
+Fallbacks for tray-less setups: a classic PowerShell balloon
+(`notify.balloon`, default on) and the deprecated desktop
+`TripFlare-运行AI研判.bat` (`notify.desktop_bat`, default off).
 
 The default signer allowlist is intentionally **empty**: a signed binary
 that appears in a drop zone with a random name (a classic renamed-lolbin

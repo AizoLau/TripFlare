@@ -17,9 +17,10 @@ then scores every change with local heuristics:
 unsigned `+3` · unknown signer `+2` · random name `+3` · runtime-DLL
 masquerade `+4` · risky location `+2` · hidden `+1` · persistence `+3`
 
-`score >= 7` = **high**: appends `URGENT.txt`, pops a Windows notification,
-and drops `TripFlare-运行AI研判.bat` on the desktop — one click opens the
-UI alerts page. Full rule table and threat model:
+`score >= 7` = **high**: appends `URGENT.txt` and notifies you through the
+**system tray agent** (persistent icon, balloon, right-click menu). The old
+desktop bat launcher is deprecated and disabled by default
+(`notify.desktop_bat`). Full rule table and threat model:
 [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Layout (portable single folder)
@@ -29,15 +30,33 @@ TripFlare\
   TripFlare控制台.bat   # double-click: opens the GUI console (pythonw)
   tripflare.py          # daemon core - full CLI kept, no UI required
   tripflare_ui.pyw      # tkinter console (5 tabs, stdlib only)
+  tripflare_tray.pyw    # system tray agent (ctypes Win32, stdlib only)
+  tripflare.ico         # tray/console icon (scripts\make_icon.py rebuilds it)
   config.json           # live config (editable in the UI, git-ignored)
   config.default.json
   prompts\  docs\  scripts\  README.md  LICENSE  .gitignore
   data\                 # state.json / alerts.jsonl / reviews\ /
-                        # URGENT.txt / tripflare.log (git-ignored)
+                        # URGENT.txt / tripflare.log / tray.log (git-ignored)
 ```
 
 The data directory defaults to `<script dir>\data`; set the
 `TRIPFLARE_DATA_DIR` environment variable to override it.
+
+## System tray agent (tripflare_tray.pyw)
+
+Pure Win32 via ctypes (Shell_NotifyIconW) — zero third-party packages:
+
+- Persistent notification-area icon; double-click opens the console.
+- Right-click menu: 打开控制台 / 立即AI研判 / 启动守护 / 停止守护 /
+  打开数据目录 / 退出托盘.
+- Tails `data\alerts.jsonl`: a new **high** alert pops a balloon
+  ("TripFlare 高危异常"); clicking it opens the console alerts page.
+  Balloon events are logged to `data\tray.log`.
+- Tooltip mirrors daemon state (refreshed every 30 s).
+- Re-adds its icon when Explorer restarts (TaskbarCreated).
+
+`install.ps1` registers it as the `TripFlareTray` logon task
+(restart-on-failure, no run-time limit) and starts it immediately.
 
 ## 30-second quickstart
 
@@ -76,7 +95,7 @@ Five tabs, Chinese interface, pure local tkinter (no ports opened):
 
 The header always shows a daemon status dot (green/gray) and the last
 alert time. `--alerts` opens directly on the alerts tab (used by the
-desktop bat); `--selftest` runs a headless sanity check.
+tray balloon click); `--selftest` runs a headless sanity check.
 
 ## Auto-start at logon (optional)
 
@@ -86,9 +105,10 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 ```
 
-`install.ps1` registers two scheduled tasks: `TripFlareDaemon` (pythonw,
-windowless, at logon) and `TripFlarePatrol` (`patrol-tick` every 30 min — a
-complete no-op unless `ai.mode` is `patrol`).
+`install.ps1` registers three scheduled tasks: `TripFlareDaemon` (pythonw,
+windowless, at logon), `TripFlarePatrol` (`patrol-tick` every 30 min — a
+complete no-op unless `ai.mode` is `patrol`) and `TripFlareTray` (the tray
+agent at logon, restarted on failure, started immediately).
 
 ## Three AI modes
 
@@ -147,13 +167,15 @@ TripFlare 是一个轻量级 Windows 异常监控（绊线式）工具：对首�
 Winlogon、StartupApproved、IFEO、服务、计划任务、高危位置新进程），
 用本地启发式规则打分（无签名 +3、未知签名者 +2、随机名 +3、伪装运
 行库 +4、高危目录 +2、隐藏属性 +1、持久化 +3），≥7 分为高危：写
-`URGENT.txt`、弹 Windows 通知，并在桌面生成《TripFlare-运行AI研判.bat》，
-双击直接打开控制台 UI 的告警页。
+`URGENT.txt`，并由**系统托盘代理**弹气球通知（旧版桌面 bat 方案已废
+弃，默认关闭）。
 
-**便携单文件夹**：代码、配置、数据（`data\`）全部在一个目录里，
+**便携单文件夹**：代码、配置、数据（`data\`）全部在一个目录里。
 双击 `TripFlare控制台.bat` 打开图形控制台（告警/报告/日志/配置/状态
-五个页签），双击《TripFlare-运行AI研判.bat》直达告警页；命令行用法
-全部保留，不用 UI 也能完整使用。
+五个页签）；任务栏右下角常驻托盘图标，双击开控制台、右键有快捷菜单
+（打开控制台 / 立即AI研判 / 启动·停止守护 / 打开数据目录 / 退出），
+出现高危告警时托盘弹气球、点击直达告警页；命令行用法全部保留，不用
+UI 也能完整使用。
 
 三档 AI 模式：`recommend`（默认，不点研判不花 token）、`patrol`
 （高危立即巡逻 10 分钟冷却 + 每 30 分钟例行巡逻，每日上限 20 次熔
@@ -162,7 +184,8 @@ Winlogon、StartupApproved、IFEO、服务、计划任务、高危位置新进�
 
 上手：双击 `TripFlare控制台.bat`，在"状态"页启动守护；或命令行
 `python tripflare.py --init` 建基线 → `python tripflare.py` 跑守护。
-`scripts\install.ps1` 可注册登录自启与定时巡逻两个计划任务，
+`scripts\install.ps1` 可注册登录自启、定时巡逻、系统托盘三个计划任务
+（TripFlareDaemon / TripFlarePatrol / TripFlareTray，托盘装完立即启动），
 `uninstall.ps1` 回滚。实测每轮约 0.9–1.8 秒、内存约 24MB，平均
 CPU 远低于 1%。
 

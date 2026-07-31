@@ -15,6 +15,9 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
+import re
+from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,8 +28,43 @@ DATA_DIR = core.DATA_DIR
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 LEVELS = ("high", "warn", "info")
-LEVEL_ZH = {"high": "高危", "warn": "警告", "info": "信息"}
+LEVEL_ZH = {"high": "高", "warn": "中", "info": "低"}
 LEVEL_COLOR = {"high": "#c0392b", "warn": "#d68910", "info": "#7f8c8d"}
+
+TYPE_ZH = {
+    "file_new": "新增文件", "file_modified": "文件修改",
+    "registry_new": "注册表新增", "registry_changed": "注册表修改",
+    "registry_modified": "注册表修改", "process_new": "新进程",
+    "task_new": "计划任务新增", "service_new": "服务新增",
+    "service_changed": "服务修改", "ifeo_debugger": "IFEO 调试器",
+}
+
+
+def human_time(ts):
+    """Human-friendly timestamp: 今天 19:10 / 昨天 22:47 / 07-28 22:47."""
+    try:
+        dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S")
+    except (ValueError, TypeError):
+        return ts or "-"
+    today = datetime.now().date()
+    if dt.date() == today:
+        return "今天 %02d:%02d" % (dt.hour, dt.minute)
+    if dt.date() == today - timedelta(days=1):
+        return "昨天 %02d:%02d" % (dt.hour, dt.minute)
+    return "%02d-%02d %02d:%02d" % (dt.month, dt.day, dt.hour, dt.minute)
+
+
+def alert_summary(a):
+    """One-line summary: file/key name + the first scoring reason."""
+    extra = a.get("extra") or {}
+    name = (extra.get("value") or extra.get("service") or extra.get("ifeo")
+            or extra.get("task") or "")
+    if not name:
+        name = os.path.basename(a.get("path", "")) or a.get("path", "")
+    reasons = a.get("reasons") or []
+    first = (reasons[0].split(" (+")[0] if reasons
+             else TYPE_ZH.get(a.get("type"), a.get("type", "")))
+    return ("%s · %s" % (name, first))[:80]
 
 
 def run_hidden(args, timeout=120):
@@ -73,8 +111,13 @@ def selftest():
         reviews = [f for f in os.listdir(core.REVIEWS_DIR)
                    if f.endswith(".md")]
     state = core.load_state() or {}
+    read_ids = core.load_read_ids()
+    unread = core.unread_alerts(alerts)
+    pending, total_wh = core.pending_review_alerts(10 ** 9)
     print("selftest: alerts=%d (high=%d warn=%d info=%d)"
           % (len(alerts), counts["high"], counts["warn"], counts["info"]))
+    print("selftest: read=%d unread=%d pending_review=%d/%d warn+high"
+          % (len(read_ids), len(unread), len(pending), total_wh))
     print("selftest: config_mode=%s backend=%s"
           % (cfg["ai"].get("mode"), core.detect_backend() or "NOT FOUND"))
     print("selftest: reviews=%d state_files=%d rounds=%d"
@@ -92,6 +135,7 @@ class TripFlareUI(tk.Tk):
         self.geometry("980x620")
         self.minsize(820, 480)
         self.cfg = core.load_config()
+        self.bold_font = tkfont.Font(weight="bold")
         self._build_header()
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=6, pady=(0, 6))
@@ -147,17 +191,21 @@ class TripFlareUI(tk.Tk):
                         command=self.refresh_alerts).pack(side="left", padx=4)
         ttk.Button(toolbar, text="刷新",
                    command=self.refresh_alerts).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="打开所在目录",
+                   command=self.open_selected_dir).pack(side="left", padx=4)
         ttk.Button(toolbar, text="加白名单",
                    command=self.allow_selected).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="全部标为已读",
+                   command=self.mark_all_read).pack(side="left", padx=4)
         self.ai_btn = ttk.Button(toolbar, text="AI 研判",
                                  command=self.start_ai_review)
         self.ai_btn.pack(side="left", padx=4)
         self.ai_busy = ttk.Progressbar(toolbar, mode="indeterminate",
                                        length=120)
         self.ai_label = ttk.Label(toolbar, text="")
-        cols = ("ts", "level", "type", "path", "score", "reasons")
-        heads = ("时间", "级别", "类型", "路径", "评分", "理由")
-        widths = (150, 60, 110, 320, 50, 320)
+        cols = ("time", "level", "type", "score", "summary", "path")
+        heads = ("时间", "级别", "类型", "风险分", "摘要", "路径")
+        widths = (110, 50, 90, 60, 300, 280)
         self.alert_tree = ttk.Treeview(tab, columns=cols, show="headings")
         for col, head, width in zip(cols, heads, widths):
             self.alert_tree.heading(col, text=head)
@@ -166,37 +214,162 @@ class TripFlareUI(tk.Tk):
                                    else "w")
         for lv, color in LEVEL_COLOR.items():
             self.alert_tree.tag_configure(lv, foreground=color)
+        self.alert_tree.tag_configure("unread", font=self.bold_font)
+        self.alert_tree.bind("<<TreeviewSelect>>", self._on_alert_select)
+        self.alert_tree.bind("<Double-Button-1>", self._on_alert_double)
+        self.alert_tree.bind("<Button-3>", self._on_alert_rightclick)
         scroll = ttk.Scrollbar(tab, orient="vertical",
                                command=self.alert_tree.yview)
         self.alert_tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.alert_tree.pack(fill="both", expand=True)
         self._alerts_cache = []
+        self._read_ids = set()
 
     def refresh_alerts(self):
         self.alert_tree.delete(*self.alert_tree.get_children())
         alerts = core.read_alerts()
+        self._read_ids = core.load_read_ids()
         if self.unread_only.get():
-            state = core.load_state() or {}
-            since = (state.get("ai") or {}).get("last_digest", 0)
-            alerts = [a for a in alerts if a.get("epoch", 0) > since]
-        self._alerts_cache = list(reversed(alerts))
-        for idx, a in enumerate(self._alerts_cache):
+            alerts = [a for a in alerts
+                      if core.alert_id(a) not in self._read_ids]
+        # Default ordering: risk score desc, then newest first.
+        alerts.sort(key=lambda a: (-(a.get("score") or 0),
+                                   -a.get("epoch", 0)))
+        self._alerts_cache = alerts
+        for idx, a in enumerate(alerts):
             lv = a.get("level", "info")
+            unread = core.alert_id(a) not in self._read_ids
+            when = human_time(a.get("ts"))
+            if unread:
+                when = "● " + when
             self.alert_tree.insert(
                 "", "end", iid=str(idx),
-                values=(a.get("ts", ""), LEVEL_ZH.get(lv, lv),
-                        a.get("type", ""), a.get("path", ""),
-                        a.get("score", ""),
-                        "; ".join(a.get("reasons", []))[:160]),
-                tags=(lv,))
+                values=(when, LEVEL_ZH.get(lv, lv),
+                        TYPE_ZH.get(a.get("type"), a.get("type", "")),
+                        a.get("score", ""), alert_summary(a),
+                        a.get("path", "")),
+                tags=[lv] + (["unread"] if unread else []))
 
-    def allow_selected(self):
+    # ---------------- read/unread handling ----------------
+
+    def _on_alert_select(self, _event=None):
+        """Selecting a row marks that alert as read (persisted)."""
         sel = self.alert_tree.selection()
-        if not sel:
-            messagebox.showinfo("加白名单", "请先选中一条告警。")
+        if len(sel) != 1:
             return
         alert = self._alerts_cache[int(sel[0])]
+        aid = core.alert_id(alert)
+        if aid in self._read_ids:
+            return
+        core.mark_alerts_read([aid])
+        self._read_ids.add(aid)
+        values = list(self.alert_tree.item(sel[0], "values"))
+        if values and values[0].startswith("● "):
+            values[0] = values[0][2:]
+        self.alert_tree.item(sel[0], values=values,
+                             tags=(alert.get("level", "info"),))
+
+    def mark_all_read(self):
+        core.mark_alerts_read([core.alert_id(a)
+                               for a in core.read_alerts()])
+        self.refresh_alerts()
+
+    # ---------------- details / navigation ----------------
+
+    def _selected_alert(self):
+        sel = self.alert_tree.selection()
+        if len(sel) != 1:
+            return None
+        return self._alerts_cache[int(sel[0])]
+
+    def _on_alert_double(self, event):
+        iid = self.alert_tree.identify_row(event.y)
+        if not iid:
+            return
+        alert = self._alerts_cache[int(iid)]
+        if alert.get("level") == "info":
+            self._show_tooltip(event.x_root, event.y_root, "信息级无详情")
+            return
+        self.show_alert_details(alert)
+
+    def _on_alert_rightclick(self, event):
+        iid = self.alert_tree.identify_row(event.y)
+        if not iid:
+            return
+        self.alert_tree.selection_set(iid)
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="打开所在目录", command=self.open_selected_dir)
+        menu.add_command(label="加白名单", command=self.allow_selected)
+        menu.add_command(label="标记已读", command=self._on_alert_select)
+        menu.post(event.x_root, event.y_root)
+
+    def _show_tooltip(self, x, y, msg):
+        tip = tk.Toplevel(self)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text=msg, background="#ffffe0", relief="solid",
+                 borderwidth=1, padx=6, pady=2).pack()
+        tip.geometry("+%d+%d" % (x + 10, y + 10))
+        tip.after(1500, tip.destroy)
+
+    def show_alert_details(self, alert):
+        lv = alert.get("level", "info")
+        lines = [
+            "时间: %s" % alert.get("ts", "-"),
+            "级别: %s    风险分: %s" % (LEVEL_ZH.get(lv, lv),
+                                      alert.get("score", "?")),
+            "类型: %s" % TYPE_ZH.get(alert.get("type"),
+                                   alert.get("type", "")),
+            "路径: %s" % alert.get("path", ""),
+            "",
+            "理由:",
+        ]
+        for reason in alert.get("reasons", []):
+            lines.append("  - " + reason)
+        if alert.get("sha1"):
+            lines.append("sha1: " + alert["sha1"])
+        if alert.get("signer"):
+            lines.append("签名者: " + alert["signer"])
+        if alert.get("sig_status"):
+            lines.append("签名状态: %s" % alert["sig_status"])
+        extra = alert.get("extra") or {}
+        if extra:
+            lines += ["", "extra:",
+                      json.dumps(extra, ensure_ascii=False, indent=2)]
+        raw = json.dumps(alert, ensure_ascii=False, indent=2)
+        dlg = tk.Toplevel(self)
+        dlg.title("告警详情")
+        dlg.geometry("680x520")
+        text = tk.Text(dlg, wrap="word", font=("Consolas", 10))
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", "\n".join(lines) + "\n\n原始 JSON:\n" + raw)
+        text.config(state="disabled")
+
+        def copy_json():
+            self.clipboard_clear()
+            self.clipboard_append(raw)
+        ttk.Button(dlg, text="复制原始 JSON",
+                   command=copy_json).pack(anchor="w", padx=6, pady=4)
+
+    def open_selected_dir(self):
+        alert = self._selected_alert()
+        if alert is None:
+            messagebox.showinfo("打开所在目录", "请先选中一条告警。")
+            return
+        target = ((alert.get("extra") or {}).get("target")
+                  or alert.get("path") or "")
+        if not re.match(r"^[A-Za-z]:\\", target):
+            self._show_tooltip(self.winfo_pointerx(), self.winfo_pointery(),
+                               "非文件路径，无法跳转")
+            return
+        subprocess.Popen(["explorer.exe", "/select," + target])
+
+    def allow_selected(self):
+        alert = self._selected_alert()
+        if alert is None:
+            messagebox.showinfo("加白名单", "请先选中一条告警。")
+            return
         target = (alert.get("extra") or {}).get("target") or alert.get("path")
         if not target:
             return
@@ -218,7 +391,7 @@ class TripFlareUI(tk.Tk):
     # ------------------------------------------------------------------
 
     def start_ai_review(self):
-        self.ai_btn.config(state="disabled")
+        self.ai_btn.config(state="disabled", text="研判中…")
         self.ai_label.config(text="")
         self.ai_busy.pack(side="left", padx=6)
         self.ai_busy.start(10)
@@ -233,13 +406,10 @@ class TripFlareUI(tk.Tk):
         if state is None:
             err = "尚未建立基线（先运行 tripflare.py --init）"
         else:
-            since = state["ai"].get("last_review", 0) or (time.time() - 86400)
-            alerts = core.read_alerts(since_epoch=since,
-                                      levels={"warn", "high"},
-                                      cap=int(cfg["ai"].get(
-                                          "review_max_alerts", 20)))
+            cap = int(cfg["ai"].get("review_max_alerts", 20))
+            alerts, total = core.pending_review_alerts(cap)
             if not alerts:
-                err = "没有需要研判的 warn/high 告警。"
+                err = "没有未研判的告警（历史共 %d 条，均已研判）" % total
             else:
                 n = len(alerts)
                 report, err = core.call_ai(
@@ -249,6 +419,7 @@ class TripFlareUI(tk.Tk):
                               "- alerts supplied: %d\n\n"
                               % (core.now_iso(), n))
                     path = core.save_review("review", header + report + "\n")
+                    core.mark_alerts_read([core.alert_id(a) for a in alerts])
                     state["ai"]["last_review"] = time.time()
                     state["ai"]["calls_today"] = \
                         state["ai"].get("calls_today", 0) + 1
@@ -258,12 +429,13 @@ class TripFlareUI(tk.Tk):
     def _ai_done(self, err, path, n):
         self.ai_busy.stop()
         self.ai_busy.pack_forget()
-        self.ai_btn.config(state="normal")
+        self.ai_btn.config(state="normal", text="AI 研判")
         if err:
             self.ai_label.config(text="")
             messagebox.showwarning("AI 研判", err)
             return
         self.ai_label.config(text="研判完成（%d 条告警）" % n)
+        self.refresh_alerts()  # reviewed alerts are now marked read
         self.refresh_reports(select=os.path.basename(path))
         self.nb.select(1)  # jump to the reports tab
 
@@ -552,7 +724,11 @@ class TripFlareUI(tk.Tk):
 def main():
     if "--selftest" in sys.argv:
         return selftest()
-    start_tab = 0 if "--alerts" in sys.argv else None
+    start_tab = None
+    if "--alerts" in sys.argv:
+        start_tab = 0
+    elif "--reports" in sys.argv:
+        start_tab = 1
     app = TripFlareUI(start_tab=start_tab)
     app.mainloop()
     return 0

@@ -57,32 +57,17 @@ def log(msg):
 # Actions (subprocess helpers; never block the message loop for long)
 # --------------------------------------------------------------------------
 
-def open_console(alerts=False):
+def open_console(alerts=False, reports=False):
     args = [core.windowless_python(), UI_SCRIPT]
-    if alerts:
+    if reports:
+        args.append("--reports")
+    elif alerts:
         args.append("--alerts")
     try:
         subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)
-        log("action: open console (alerts=%s)" % alerts)
+        log("action: open console (alerts=%s reports=%s)" % (alerts, reports))
     except OSError as exc:
         log("open console failed: %s" % exc)
-
-
-def ai_review_async():
-    def worker():
-        try:
-            proc = subprocess.run(
-                [core.console_python(), CORE_SCRIPT, "ai-review"],
-                capture_output=True, timeout=900,
-                creationflags=CREATE_NO_WINDOW)
-            out = proc.stdout.decode("utf-8", "replace").strip()
-            last = out.splitlines()[-1] if out else "(no output)"
-            log("action: ai-review finished rc=%d: %s"
-                % (proc.returncode, last[:200]))
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log("action: ai-review failed: %s" % exc)
-    log("action: ai-review started")
-    threading.Thread(target=worker, daemon=True).start()
 
 
 def daemon_task(action):
@@ -135,6 +120,7 @@ kernel32 = ctypes.windll.kernel32
 
 WM_USER = 0x0400
 WM_TRAYICON = WM_USER + 1
+WM_TRAY_BALLOON = WM_USER + 2  # internal: show pending text balloon
 WM_TIMER = 0x0113
 WM_DESTROY = 0x0002
 WM_NULL = 0x0000
@@ -208,24 +194,72 @@ class MENUITEMINFOW(ctypes.Structure):
                 ("cch", ctypes.c_uint), ("hbmpItem", wt.HANDLE)]
 
 
-MIIM_STRING, MIIM_ID, MIIM_FTYPE = 0x0040, 0x0002, 0x0100
+MIIM_STRING, MIIM_ID, MIIM_FTYPE, MIIM_STATE = 0x0040, 0x0002, 0x0100, 0x0001
 MFT_STRING, MFT_SEPARATOR = 0x0000, 0x0800
+MFS_GRAYED = 0x0003
 MF_BYPOSITION = 0x0400
 
-# Menu layout shared by the tray popup and --menutest. None = separator.
-MENU_ITEMS = [
-    (CMD_CONSOLE, "打开控制台"),
-    (CMD_REVIEW, "立即AI研判"),
-    None,
-    (CMD_START, "启动守护"),
-    (CMD_STOP, "停止守护"),
-    None,
-    (CMD_DATADIR, "打开数据目录"),
-    (CMD_QUIT, "退出托盘"),
-]
+def menu_items(daemon_on, ai_on):
+    """Menu layout; None = separator. State-aware labels/enablement."""
+    return [
+        (CMD_CONSOLE, "打开控制台", True),
+        (CMD_REVIEW,
+         "AI 研判（进行中…）" if ai_on else "立即AI研判", not ai_on),
+        None,
+        (CMD_START, "启动守护", not daemon_on),
+        (CMD_STOP, "停止守护", daemon_on),
+        None,
+        (CMD_DATADIR, "打开数据目录", True),
+        (CMD_QUIT, "退出托盘", True),
+    ]
 
-# Full prototypes for every Win32 call used below: 64-bit handles must not
-# fall back to ctypes' 32-bit defaults, and LPCWSTR must receive real str.
+
+def build_menu(daemon_on=True, ai_on=False):
+    """Create the tray popup menu via InsertMenuItemW/MENUITEMINFOW."""
+    menu = user32.CreatePopupMenu()
+    for pos, item in enumerate(menu_items(daemon_on, ai_on)):
+        mii = MENUITEMINFOW()
+        mii.cbSize = ctypes.sizeof(MENUITEMINFOW)
+        if item is None:
+            mii.fMask = MIIM_FTYPE
+            mii.fType = MFT_SEPARATOR
+        else:
+            cmd, text, enabled = item
+            mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING | MIIM_STATE
+            mii.fType = MFT_STRING
+            mii.wID = cmd
+            mii.dwTypeData = text
+            mii.fState = 0 if enabled else MFS_GRAYED
+        if not user32.InsertMenuItemW(menu, pos, True, ctypes.byref(mii)):
+            log("InsertMenuItemW failed at pos %d, err=%d"
+                % (pos, kernel32.GetLastError()))
+    return menu
+
+
+def menutest():
+    """Headless menu self-check: read entries back with GetMenuStringW."""
+    for daemon_on, ai_on in ((True, False), (False, True)):
+        print("menutest: scenario daemon_running=%s ai_running=%s"
+              % (daemon_on, ai_on))
+        menu = build_menu(daemon_on, ai_on)
+        count = user32.GetMenuItemCount(menu)
+        print("menutest: item count = %d (expect 8)" % count)
+        for pos in range(count):
+            mii = MENUITEMINFOW()
+            mii.cbSize = ctypes.sizeof(MENUITEMINFOW)
+            mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STATE
+            user32.GetMenuItemInfoW(menu, pos, True, ctypes.byref(mii))
+            buf = ctypes.create_unicode_buffer(128)
+            user32.GetMenuStringW(menu, pos, buf, 128, MF_BYPOSITION)
+            if mii.fType & MFT_SEPARATOR:
+                print("menutest: [%d] <separator>" % pos)
+            else:
+                state = "DISABLED" if (mii.fState & MFS_GRAYED) else "enabled"
+                print("menutest: [%d] id=%d %s text=%s"
+                      % (pos, mii.wID, state, buf.value))
+        user32.DestroyMenu(menu)
+    print("menutest: OK")
+    return 0
 shell32.Shell_NotifyIconW.argtypes = [ctypes.c_ulong,
                                       ctypes.POINTER(NOTIFYICONDATAW)]
 shell32.Shell_NotifyIconW.restype = wt.BOOL
@@ -293,54 +327,17 @@ kernel32.CreateMutexW.restype = wt.HANDLE
 kernel32.GetLastError.restype = ctypes.c_ulong
 
 
-def build_menu():
-    """Create the tray popup menu via InsertMenuItemW/MENUITEMINFOW."""
-    menu = user32.CreatePopupMenu()
-    for pos, item in enumerate(MENU_ITEMS):
-        mii = MENUITEMINFOW()
-        mii.cbSize = ctypes.sizeof(MENUITEMINFOW)
-        if item is None:
-            mii.fMask = MIIM_FTYPE
-            mii.fType = MFT_SEPARATOR
-        else:
-            cmd, text = item
-            mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING
-            mii.fType = MFT_STRING
-            mii.wID = cmd
-            mii.dwTypeData = text
-        if not user32.InsertMenuItemW(menu, pos, True, ctypes.byref(mii)):
-            log("InsertMenuItemW failed at pos %d, err=%d"
-                % (pos, kernel32.GetLastError()))
-    return menu
-
-
-def menutest():
-    """Headless menu self-check: read every entry back with GetMenuStringW."""
-    menu = build_menu()
-    count = user32.GetMenuItemCount(menu)
-    print("menutest: item count = %d (expect 8)" % count)
-    for pos in range(count):
-        mii = MENUITEMINFOW()
-        mii.cbSize = ctypes.sizeof(MENUITEMINFOW)
-        mii.fMask = MIIM_FTYPE | MIIM_ID
-        user32.GetMenuItemInfoW(menu, pos, True, ctypes.byref(mii))
-        buf = ctypes.create_unicode_buffer(128)
-        user32.GetMenuStringW(menu, pos, buf, 128, MF_BYPOSITION)
-        if mii.fType & MFT_SEPARATOR:
-            print("menutest: [%d] <separator>" % pos)
-        else:
-            print("menutest: [%d] id=%d text=%s" % (pos, mii.wID, buf.value))
-    user32.DestroyMenu(menu)
-    print("menutest: OK")
-    return 0
-
-
 class TrayApp:
     def __init__(self):
         self.hwnd = None
         self.hicon = None
         self.nid = None
         self.alerts_offset = 0
+        self.ai_running = False
+        self.daemon_state = None       # None = not probed yet
+        self.pending_balloon = None    # (title, body, kind) for UI thread
+        self.balloon_kind = "alert"    # what the visible balloon links to
+        self.reviewtest = False
         self.taskbar_created = user32.RegisterWindowMessageW(
             "TaskbarCreated")
         self._wndproc = WNDPROC(self._on_message)  # keep a reference
@@ -398,7 +395,8 @@ class TrayApp:
         log("notify icon added: %s" % bool(ok))
 
     def _refresh_tooltip(self):
-        tip = ("TripFlare - 守护运行中" if daemon_running()
+        self.daemon_state = daemon_running()
+        tip = ("TripFlare - 守护运行中" if self.daemon_state
                else "TripFlare - 守护已停止")
         self.nid.uFlags = NIF_TIP
         self.nid.szTip = tip
@@ -442,18 +440,70 @@ class TrayApp:
         path = alert.get("path", "?")
         body = "%s\n评分 %s · %s" % (
             path, alert.get("score", "?"), alert.get("type", ""))
+        self._show_text_balloon("TripFlare 高危异常", body, "alert")
+
+    def _show_text_balloon(self, title, body, kind):
+        """Show a NIF_INFO balloon (UI thread only) and remember its kind."""
+        self.balloon_kind = kind
         self.nid.uFlags = NIF_INFO
         self.nid.szInfo = body[:255]
-        self.nid.szInfoTitle = "TripFlare 高危异常"
+        self.nid.szInfoTitle = title[:63]
         self.nid.dwInfoFlags = NIIF_INFO
         self.nid.uTimeout = 10000
         ok = shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self.nid))
-        log("balloon shown=%s: %s" % (bool(ok), body.replace("\n", " | ")))
+        log("balloon shown=%s kind=%s: %s | %s"
+            % (bool(ok), kind, title, body.replace("\n", " | ")))
+        if self.reviewtest and kind in ("review_done", "error", "info"):
+            log("reviewtest: terminal balloon kind=%s, exiting" % kind)
+            user32.DestroyWindow(self.hwnd)
+
+    def _post_balloon(self, title, body, kind):
+        """Thread-safe balloon request: the UI thread shows it."""
+        self.pending_balloon = (title, body, kind)
+        if self.hwnd:
+            user32.PostMessageW(self.hwnd, WM_TRAY_BALLOON, 0, 0)
+
+    # ---------------- AI review with three-state feedback ----------------
+
+    def ai_review_start(self):
+        if self.ai_running:
+            return
+        self.ai_running = True
+        log("action: ai-review started")
+        self._post_balloon("TripFlare", "AI 研判进行中…", "progress")
+        threading.Thread(target=self._ai_worker, daemon=True).start()
+
+    def _ai_worker(self):
+        try:
+            proc = subprocess.run(
+                [core.console_python(), CORE_SCRIPT, "ai-review"],
+                capture_output=True, timeout=900,
+                creationflags=CREATE_NO_WINDOW)
+            out = (proc.stdout + proc.stderr).decode("utf-8",
+                                                   "replace").strip()
+            last = out.splitlines()[-1] if out else "(no output)"
+            log("action: ai-review finished rc=%d: %s"
+                % (proc.returncode, last[:200]))
+            if proc.returncode != 0:
+                self._post_balloon("AI 研判失败", last[:200], "error")
+            elif "No pending alerts" in out:
+                self._post_balloon("TripFlare AI 研判",
+                                   "没有未研判的告警", "info")
+            else:
+                self._post_balloon("TripFlare",
+                                   "研判完成，点击查看报告", "review_done")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log("action: ai-review failed: %s" % exc)
+            self._post_balloon("AI 研判失败", str(exc)[:200], "error")
+        finally:
+            self.ai_running = False
 
     # ---------------- context menu ----------------
 
     def _show_menu(self):
-        menu = build_menu()
+        # Rebuild each time so enablement mirrors the live daemon state.
+        self.daemon_state = daemon_running()
+        menu = build_menu(self.daemon_state, self.ai_running)
         pt = POINT()
         user32.GetCursorPos(ctypes.byref(pt))
         user32.SetForegroundWindow(self.hwnd)
@@ -468,11 +518,13 @@ class TrayApp:
         if cmd == CMD_CONSOLE:
             open_console()
         elif cmd == CMD_REVIEW:
-            ai_review_async()
+            self.ai_review_start()
         elif cmd == CMD_START:
             daemon_task("run")
+            self._refresh_tooltip()
         elif cmd == CMD_STOP:
             daemon_task("end")
+            self._refresh_tooltip()
         elif cmd == CMD_DATADIR:
             open_data_dir()
         elif cmd == CMD_QUIT:
@@ -485,13 +537,22 @@ class TrayApp:
     def _on_message(self, hwnd, msg, wparam, lparam):
         if msg == WM_TRAYICON:
             if lparam in (NIN_BALLOONUSERCLICK,):
-                open_console(alerts=True)
+                if self.balloon_kind == "review_done":
+                    open_console(reports=True)
+                else:
+                    open_console(alerts=True)
             elif lparam in (NIN_SELECT, WM_LBUTTONUP):
                 open_console()
             elif lparam == WM_LBUTTONDBLCLK:
                 open_console()
             elif lparam in (WM_RBUTTONUP, WM_CONTEXTMENU):
                 self._show_menu()
+            return 0
+        if msg == WM_TRAY_BALLOON:
+            if self.pending_balloon:
+                title, body, kind = self.pending_balloon
+                self.pending_balloon = None
+                self._show_text_balloon(title, body, kind)
             return 0
         if msg == WM_TIMER:
             if wparam == TIMER_ALERTS:
@@ -528,9 +589,26 @@ def already_running():
     return kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
 
 
+def reviewtest():
+    """Test hook: run the tray, trigger one AI review, exit on its balloon."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    app = TrayApp()
+    app.reviewtest = True
+    app.setup()
+    log("reviewtest: tray up, triggering ai-review")
+    app.ai_review_start()
+    msg = wt.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageW(ctypes.byref(msg))
+    return 0
+
+
 def main():
     if "--menutest" in sys.argv:
         return menutest()
+    if "--reviewtest" in sys.argv:
+        return reviewtest()
     os.makedirs(DATA_DIR, exist_ok=True)
     if already_running():
         log("tray already running, second instance exits")

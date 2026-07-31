@@ -50,6 +50,7 @@ DATA_DIR = os.environ.get("TRIPFLARE_DATA_DIR") or os.path.join(
     SCRIPT_DIR, "data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 ALERTS_PATH = os.path.join(DATA_DIR, "alerts.jsonl")
+READ_ALERTS_PATH = os.path.join(DATA_DIR, "read_alerts.json")
 URGENT_PATH = os.path.join(DATA_DIR, "URGENT.txt")
 LOG_PATH = os.path.join(DATA_DIR, "tripflare.log")
 REVIEWS_DIR = os.path.join(DATA_DIR, "reviews")
@@ -330,6 +331,65 @@ def read_alerts(since_epoch=0.0, levels=None, cap=None):
     if cap:
         alerts = alerts[-cap:]
     return alerts
+
+
+# --------------------------------------------------------------------------
+# Read/unread tracking - read_alerts.json is the single source of truth
+# shared by the CLI (digest / ai-review), the console UI and the tray.
+# --------------------------------------------------------------------------
+
+def alert_id(alert):
+    """Stable id for one alert (fallback when old entries lack 'id')."""
+    return str(alert.get("id") or "%s-%s-%s" % (
+        alert.get("epoch"), alert.get("type"), alert.get("path")))
+
+
+def load_read_ids():
+    try:
+        with open(READ_ALERTS_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return set(str(x) for x in data.get("read", []))
+    except (OSError, ValueError):
+        return set()
+
+
+def mark_alerts_read(ids):
+    """Add ids to the read set (bounded at the newest 5000). Returns added."""
+    read_list = []
+    seen = set()
+    try:
+        with open(READ_ALERTS_PATH, "r", encoding="utf-8") as fh:
+            for x in json.load(fh).get("read", []):
+                x = str(x)
+                if x not in seen:
+                    seen.add(x)
+                    read_list.append(x)
+    except (OSError, ValueError):
+        pass
+    added = 0
+    for i in ids:
+        i = str(i)
+        if i not in seen:
+            seen.add(i)
+            read_list.append(i)
+            added += 1
+    if added or len(read_list) > 5000:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(READ_ALERTS_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"read": read_list[-5000:]}, fh, ensure_ascii=False)
+    return added
+
+
+def unread_alerts(alerts):
+    read = load_read_ids()
+    return [a for a in alerts if alert_id(a) not in read]
+
+
+def pending_review_alerts(cap):
+    """Unread warn/high alerts awaiting AI review (newest-first capped)."""
+    candidates = read_alerts(levels={"warn", "high"})
+    pending = unread_alerts(candidates)
+    return pending[-cap:], len(candidates)
 
 
 def append_urgent(text):
@@ -1406,21 +1466,20 @@ def cmd_daemon(cfg):
 
 
 def cmd_digest(cfg):
-    """Print (and mark as read) alerts since the last digest."""
+    """Print unread alerts and mark them read (read_alerts.json)."""
     state = load_state()
     if state is None:
         print("No baseline yet. Run: tripflare.py --init")
         return 1
-    since = state["ai"].get("last_digest", 0)
-    alerts = read_alerts(since_epoch=since)
+    alerts = unread_alerts(read_alerts())
     if not alerts:
-        print("No new alerts since the last digest.")
+        print("No unread alerts.")
         return 0
     order = {"high": 0, "warn": 1, "info": 2}
     alerts.sort(key=lambda a: (order.get(a.get("level"), 3),
                                a.get("epoch", 0)))
     counts = {"high": 0, "warn": 0, "info": 0}
-    print("TripFlare digest - %d new alert(s)\n" % len(alerts))
+    print("TripFlare digest - %d unread alert(s)\n" % len(alerts))
     for a in alerts:
         counts[a.get("level", "info")] = counts.get(a.get("level", "info"), 0) + 1
         print("[%s] score=%s %s %s" % (a.get("level", "?").upper(),
@@ -1430,22 +1489,23 @@ def cmd_digest(cfg):
             print("    - " + reason)
     print("\nTotals: high=%d warn=%d info=%d"
           % (counts["high"], counts["warn"], counts["info"]))
-    state["ai"]["last_digest"] = time.time()
+    mark_alerts_read([alert_id(a) for a in alerts])
+    state["ai"]["last_digest"] = time.time()  # telemetry only
     save_state(state)
     return 0
 
 
 def cmd_ai_review(cfg, max_alerts=None):
-    """One-shot AI review of pending warn/high alerts (user-invoked)."""
+    """One-shot AI review of unread warn/high alerts (user-invoked)."""
     state = load_state()
     if state is None:
         print("No baseline yet. Run: tripflare.py --init")
         return 1
-    since = state["ai"].get("last_review", 0) or (time.time() - 86400)
     cap = max_alerts or int(cfg["ai"].get("review_max_alerts", 20))
-    alerts = read_alerts(since_epoch=since, levels={"warn", "high"}, cap=cap)
+    alerts, total = pending_review_alerts(cap)
     if not alerts:
-        print("No new warn/high alerts to review.")
+        print("No pending alerts to review (%d warn/high alert(s) in "
+              "history, all reviewed)." % total)
         return 0
     print("Sending %d alert(s) to the AI backend...\n" % len(alerts))
     report, err = call_ai(cfg, build_review_prompt(alerts))
@@ -1455,6 +1515,7 @@ def cmd_ai_review(cfg, max_alerts=None):
     header = ("# TripFlare AI review\n\n- time: %s\n- alerts supplied: %d\n\n"
               % (now_iso(), len(alerts)))
     path = save_review("review", header + report + "\n")
+    mark_alerts_read([alert_id(a) for a in alerts])
     state["ai"]["last_review"] = time.time()
     state["ai"]["calls_today"] = state["ai"].get("calls_today", 0) + 1
     save_state(state)

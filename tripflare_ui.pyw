@@ -55,16 +55,86 @@ def human_time(ts):
 
 
 def alert_summary(a):
-    """One-line summary: file/key name + the first scoring reason."""
+    """Decluttered summary: object name + up to 2 Chinese risk tags."""
+    return (object_name(a) + " " + risk_tags(a)).strip()
+
+
+def object_name(a):
+    """Short object name: file name / key tail / task / service name."""
     extra = a.get("extra") or {}
-    name = (extra.get("value") or extra.get("service") or extra.get("ifeo")
-            or extra.get("task") or "")
-    if not name:
-        name = os.path.basename(a.get("path", "")) or a.get("path", "")
-    reasons = a.get("reasons") or []
-    first = (reasons[0].split(" (+")[0] if reasons
-             else TYPE_ZH.get(a.get("type"), a.get("type", "")))
-    return ("%s · %s" % (name, first))[:80]
+    for key in ("value", "service", "ifeo"):
+        if extra.get(key):
+            return extra[key]
+    path = a.get("path", "")
+    if path.startswith("schtasks:"):
+        tail = extra.get("task") or path[len("schtasks:"):]
+        return tail.rstrip("\\").split("\\")[-1]
+    if path.startswith("service:"):
+        return extra.get("service") or path[len("service:"):]
+    return os.path.basename(path) or path
+
+
+# Reason-text -> short Chinese risk tag, matched in order.
+REASON_TAGS = [
+    ("random-looking name", "随机名"),
+    ("vowel-less", "随机名"),
+    ("guid-named", "随机名"),
+    ("high-risk drop zone", "高危目录"),
+    ("hidden directory", "隐藏目录"),
+    ("signer not in allowlist", "签名者未加白"),
+    ("unsigned", "无有效签名"),
+    ("not signed", "无有效签名"),
+    ("masquerades", "伪装运行库名"),
+    ("persistence", "持久化"),
+    ("hidden file attribute", "隐藏属性"),
+    ("critical autostart", "关键自启动"),
+    ("ifeo", "IFEO 劫持"),
+]
+
+
+def risk_tags(a):
+    """Map the alert's reasons to at most two 〔中文标签〕."""
+    tags = []
+    for reason in a.get("reasons") or []:
+        low = reason.lower()
+        tag = None
+        for key, label in REASON_TAGS:
+            if key in low:
+                tag = label
+                break
+        if tag is None:  # unmapped: first reason text, truncated
+            tag = reason.split(" (+")[0][:20]
+        if tag not in tags:
+            tags.append(tag)
+        if len(tags) >= 2:
+            break
+    return "".join("〔%s〕" % t for t in tags)
+
+
+def resolve_open_target(path):
+    """Decide what 'open folder' should run for an alert path.
+
+    Returns (cmd_list | None, note). Never launches anything itself.
+    """
+    if not path:
+        return None, "非文件路径，无目录可开"
+    if path.startswith(("schtasks:", "service:", "ifeo:")):
+        return None, "非文件路径，无目录可开"
+    if re.match(r"^[A-Z_]+\\", path):  # registry key shape: HKCU\..., HKEY_...
+        return None, "非文件路径，无目录可开"
+    if not re.match(r"^[A-Za-z]:\\", path):
+        return None, "非文件路径，无目录可开"
+    if os.path.exists(path):
+        return ["explorer.exe", "/select," + path], ""
+    parent = os.path.dirname(path)
+    while parent and not os.path.isdir(parent):
+        nxt = os.path.dirname(parent)
+        if nxt == parent:
+            break
+        parent = nxt
+    if parent and os.path.isdir(parent):
+        return ["explorer.exe", parent], "文件已不存在，已打开上级目录"
+    return None, "路径已不存在"
 
 
 def run_hidden(args, timeout=120):
@@ -124,6 +194,28 @@ def selftest():
           % (len(reviews), len(state.get("files", {})),
              state.get("rounds", 0)))
     print("selftest: daemon_running=%s" % daemon_running())
+    # Sample summary rendering (decluttered column check).
+    samples = []
+    for want in ("high", "warn", "info"):
+        for a in reversed(alerts):
+            if a.get("level") == want:
+                samples.append(a)
+                break
+    for a in samples:
+        print("selftest: summary[%s] %s" % (a.get("level", "?"),
+                                            alert_summary(a)))
+    # resolve_open_target coverage: existing file / missing file / task.
+    cases = [
+        ("existing-file",
+         os.path.join(SCRIPT_DIR, "tripflare.py")),
+        ("missing-file",
+         os.path.join(os.path.expanduser("~"), "Downloads",
+                      "ZZ_NO_SUCH_FILE_9Q.exe")),
+        ("schtasks-path", r"schtasks:\TripFlareTray"),
+    ]
+    for name, path in cases:
+        cmd, note = resolve_open_target(path)
+        print("selftest: open_target[%s] cmd=%s note=%s" % (name, cmd, note))
     print("selftest: OK")
     return 0
 
@@ -173,7 +265,8 @@ class TripFlareUI(tk.Tk):
             self.hdr_daemon.config(text="● 守护运行中", foreground="#27ae60")
         else:
             self.hdr_daemon.config(text="● 守护未运行", foreground="#7f8c8d")
-        self.hdr_alert.config(text="最近告警: %s" % last_alert_ts())
+        self.hdr_alert.config(text="最近告警: %s"
+                              % human_time(last_alert_ts()))
         self.after(5000, self._refresh_header)
 
     # ------------------------------------------------------------------
@@ -191,8 +284,9 @@ class TripFlareUI(tk.Tk):
                         command=self.refresh_alerts).pack(side="left", padx=4)
         ttk.Button(toolbar, text="刷新",
                    command=self.refresh_alerts).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="打开所在目录",
-                   command=self.open_selected_dir).pack(side="left", padx=4)
+        self.open_dir_btn = ttk.Button(toolbar, text="打开所在目录",
+                                       command=self.open_selected_dir)
+        self.open_dir_btn.pack(side="left", padx=4)
         ttk.Button(toolbar, text="加白名单",
                    command=self.allow_selected).pack(side="left", padx=4)
         ttk.Button(toolbar, text="全部标为已读",
@@ -200,18 +294,22 @@ class TripFlareUI(tk.Tk):
         self.ai_btn = ttk.Button(toolbar, text="AI 研判",
                                  command=self.start_ai_review)
         self.ai_btn.pack(side="left", padx=4)
+        self._hover_tip = None
+        self.ai_btn.bind("<Enter>", lambda _e: self._hover_show(
+            "研判上次以来新增的中/高级告警（信息级不送 AI）"))
+        self.ai_btn.bind("<Leave>", lambda _e: self._hover_hide())
         self.ai_busy = ttk.Progressbar(toolbar, mode="indeterminate",
                                        length=120)
         self.ai_label = ttk.Label(toolbar, text="")
         cols = ("time", "level", "type", "score", "summary", "path")
         heads = ("时间", "级别", "类型", "风险分", "摘要", "路径")
-        widths = (110, 50, 90, 60, 300, 280)
+        widths = (100, 45, 90, 55, 200, 260)
         self.alert_tree = ttk.Treeview(tab, columns=cols, show="headings")
         for col, head, width in zip(cols, heads, widths):
             self.alert_tree.heading(col, text=head)
-            self.alert_tree.column(col, width=width,
-                                   anchor="center" if col in ("level", "score")
-                                   else "w")
+            self.alert_tree.column(
+                col, width=width, stretch=(col == "path"),
+                anchor="center" if col in ("level", "score") else "w")
         for lv, color in LEVEL_COLOR.items():
             self.alert_tree.tag_configure(lv, foreground=color)
         self.alert_tree.tag_configure("unread", font=self.bold_font)
@@ -255,6 +353,7 @@ class TripFlareUI(tk.Tk):
 
     def _on_alert_select(self, _event=None):
         """Selecting a row marks that alert as read (persisted)."""
+        self._update_open_dir_state()
         sel = self.alert_tree.selection()
         if len(sel) != 1:
             return
@@ -269,6 +368,17 @@ class TripFlareUI(tk.Tk):
             values[0] = values[0][2:]
         self.alert_tree.item(sel[0], values=values,
                              tags=(alert.get("level", "info"),))
+
+    def _update_open_dir_state(self):
+        """Grey out 'open folder' when the row has no filesystem target."""
+        alert = self._selected_alert()
+        path = ""
+        if alert is not None:
+            path = ((alert.get("extra") or {}).get("target")
+                    or alert.get("path") or "")
+        cmd, _note = resolve_open_target(path)
+        self.open_dir_btn.config(
+            state="normal" if cmd is not None else "disabled")
 
     def mark_all_read(self):
         core.mark_alerts_read([core.alert_id(a)
@@ -298,8 +408,13 @@ class TripFlareUI(tk.Tk):
         if not iid:
             return
         self.alert_tree.selection_set(iid)
+        alert = self._alerts_cache[int(iid)]
+        path = ((alert.get("extra") or {}).get("target")
+                or alert.get("path") or "")
+        cmd, _note = resolve_open_target(path)
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="打开所在目录", command=self.open_selected_dir)
+        menu.add_command(label="打开所在目录", command=self.open_selected_dir,
+                         state="normal" if cmd is not None else "disabled")
         menu.add_command(label="加白名单", command=self.allow_selected)
         menu.add_command(label="标记已读", command=self._on_alert_select)
         menu.post(event.x_root, event.y_root)
@@ -312,6 +427,24 @@ class TripFlareUI(tk.Tk):
                  borderwidth=1, padx=6, pady=2).pack()
         tip.geometry("+%d+%d" % (x + 10, y + 10))
         tip.after(1500, tip.destroy)
+        return tip
+
+    def _hover_show(self, msg):
+        """Persistent tooltip while hovering a widget (e.g. the AI button)."""
+        self._hover_hide()
+        tip = tk.Toplevel(self)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text=msg, background="#ffffe0", relief="solid",
+                 borderwidth=1, padx=6, pady=2).pack()
+        tip.geometry("+%d+%d" % (self.winfo_pointerx() + 12,
+                                 self.winfo_pointery() + 12))
+        self._hover_tip = tip
+
+    def _hover_hide(self):
+        if self._hover_tip is not None:
+            self._hover_tip.destroy()
+            self._hover_tip = None
 
     def show_alert_details(self, alert):
         lv = alert.get("level", "info")
@@ -359,11 +492,15 @@ class TripFlareUI(tk.Tk):
             return
         target = ((alert.get("extra") or {}).get("target")
                   or alert.get("path") or "")
-        if not re.match(r"^[A-Za-z]:\\", target):
+        cmd, note = resolve_open_target(target)
+        if cmd is None:
             self._show_tooltip(self.winfo_pointerx(), self.winfo_pointery(),
-                               "非文件路径，无法跳转")
+                               note)
             return
-        subprocess.Popen(["explorer.exe", "/select," + target])
+        subprocess.Popen(cmd)
+        if note:
+            self._show_tooltip(self.winfo_pointerx(), self.winfo_pointery(),
+                               note)
 
     def allow_selected(self):
         alert = self._selected_alert()
@@ -391,6 +528,19 @@ class TripFlareUI(tk.Tk):
     # ------------------------------------------------------------------
 
     def start_ai_review(self):
+        cap = int(self.cfg["ai"].get("review_max_alerts", 20))
+        pending, total = core.pending_review_alerts(cap)
+        if not pending:
+            messagebox.showinfo(
+                "AI 研判",
+                "没有未研判的告警（历史共 %d 条，均已研判）" % total)
+            return
+        if not messagebox.askyesno(
+                "AI 研判",
+                "本次将研判上次以来新增的 %d 条中/高级告警"
+                "（信息级不送 AI，预计消耗一次调用的少量 token）。"
+                "继续？" % len(pending)):
+            return
         self.ai_btn.config(state="disabled", text="研判中…")
         self.ai_label.config(text="")
         self.ai_busy.pack(side="left", padx=6)

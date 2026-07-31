@@ -122,6 +122,11 @@ Set `"ai": {"mode": "..."}` in `config.json` (or the UI config tab). The
 AI backend is any CLI that maps `-p "<prompt>"` to text on stdout —
 kimi.exe is auto-detected; point `ai.backend_path` at anything else.
 
+Reviews are incremental: only unread warn/high alerts are sent (info-level
+never goes to the AI), and reviewed alerts are marked read in
+`data\read_alerts.json` — the same read state the console UI shows, so an
+alert is never reviewed twice.
+
 In patrol mode the AI investigates read-only (signatures, file headers,
 hash lookups, registry cross-checks) and writes `data\reviews\patrol-*.md`;
 `high` verdicts escalate to `URGENT.txt` + notification. Auto-quarantine
@@ -180,7 +185,9 @@ UI 也能完整使用。
 三档 AI 模式：`recommend`（默认，不点研判不花 token）、`patrol`
 （高危立即巡逻 10 分钟冷却 + 每 30 分钟例行巡逻，每日上限 20 次熔
 断，AI 默认只读）、`off`（纯本地）。AI 后端默认自动探测 kimi.exe，
-可换任何"收 prompt 出文本"的命令行工具。
+可换任何"收 prompt 出文本"的命令行工具。研判为增量口径：只发送上
+次以来未读的中/高级告警（信息级不送 AI），研判处自动标记已读，与
+控制台告警页的已读状态同源，同一告警绝不重复送审。
 
 上手：双击 `TripFlare控制台.bat`，在"状态"页启动守护；或命令行
 `python tripflare.py --init` 建基线 → `python tripflare.py` 跑守护。

@@ -1,5 +1,6 @@
 # Runtime data and local config
 config.json
+data/
 state.json
 alerts.jsonl
 URGENT.txt

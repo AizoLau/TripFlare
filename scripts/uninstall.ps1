@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
   Removes the TripFlare scheduled tasks (TripFlareDaemon, TripFlarePatrol).
-  Does NOT delete the project or the data directory %LOCALAPPDATA%\TripFlare.
+  Does NOT delete the project folder or its data\ directory.
 #>
 $ErrorActionPreference = 'Continue'
 

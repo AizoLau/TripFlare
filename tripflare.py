@@ -14,8 +14,9 @@ Usage:
     tripflare.py patrol-tick     Scheduled-task entry for AI patrol mode.
     tripflare.py --bench         Run one timed round and print stage timings.
 
-Runtime data lives in %LOCALAPPDATA%\\TripFlare\\ (state.json, alerts.jsonl,
-reviews\\, URGENT.txt, tripflare.log).
+Runtime data lives in <script dir>\\data\\ by default (state.json,
+alerts.jsonl, reviews\\, URGENT.txt, tripflare.log); override with the
+TRIPFLARE_DATA_DIR environment variable.
 """
 from __future__ import annotations
 
@@ -46,7 +47,7 @@ NO_WINDOW_KW = {"creationflags": 0x08000000} if os.name == "nt" else {}
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("TRIPFLARE_DATA_DIR") or os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "TripFlare")
+    SCRIPT_DIR, "data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 ALERTS_PATH = os.path.join(DATA_DIR, "alerts.jsonl")
 URGENT_PATH = os.path.join(DATA_DIR, "URGENT.txt")
@@ -208,8 +209,8 @@ def deep_merge(base, override):
 
 
 def find_config_path():
-    for cand in (os.path.join(DATA_DIR, "config.json"),
-                 os.path.join(SCRIPT_DIR, "config.json")):
+    for cand in (os.path.join(SCRIPT_DIR, "config.json"),
+                 os.path.join(DATA_DIR, "config.json")):
         if os.path.exists(cand):
             return cand
     default = os.path.join(SCRIPT_DIR, "config.default.json")
@@ -379,19 +380,28 @@ def console_python():
     return shutil.which("python.exe") or "python.exe"
 
 
+def windowless_python():
+    """Resolve pythonw.exe for launching the UI without a console."""
+    exe = sys.executable or ""
+    base = os.path.basename(exe).lower()
+    if base == "pythonw.exe":
+        return exe
+    if base.startswith("python"):
+        cand = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(cand):
+            return cand
+    return shutil.which("pythonw.exe") or exe
+
+
 def write_desktop_bat():
-    """(Re)create the one-click AI review launcher on the user desktop."""
-    bat_path = os.path.join(os.path.expanduser("~"), "Desktop",
-                            "TripFlare-运行AI研判.bat")
+    """(Re)create the one-click launcher that opens the UI alerts page."""
+    bat_path = desktop_bat_path()
+    ui_script = os.path.join(SCRIPT_DIR, "tripflare_ui.pyw")
     content = (
         "chcp 65001 >nul\r\n"
         "@echo off\r\n"
-        "title TripFlare AI Review\r\n"
-        "\"%s\" \"%s\" ai-review\r\n"
-        "echo.\r\n"
-        "echo Report saved under %%LOCALAPPDATA%%\\TripFlare\\reviews\\\r\n"
-        "pause\r\n"
-    ) % (console_python(), os.path.abspath(__file__))
+        "start \"\" \"%s\" \"%s\" --alerts\r\n"
+    ) % (windowless_python(), ui_script)
     try:
         with open(bat_path, "w", encoding="ascii", errors="replace",
                   newline="") as fh:

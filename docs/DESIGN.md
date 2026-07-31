@@ -48,7 +48,8 @@ only metadata — so `--init` stays fast.
 
 `>= 7` = **high**, `3-6` = **warn**, `< 3` = **info**. High alerts append
 to `URGENT.txt`, pop a balloon notification, and (outside patrol mode)
-drop `TripFlare-运行AI研判.bat` on the desktop for one-click AI review.
+drop `TripFlare-运行AI研判.bat` on the desktop — one click opens the
+console UI (`tripflare_ui.pyw --alerts`) on its alerts page.
 
 The default signer allowlist is intentionally **empty**: a signed binary
 that appears in a drop zone with a random name (a classic renamed-lolbin
@@ -57,8 +58,8 @@ they trust with `tripflare.py allow "CN=Some Vendor"`.
 
 ## Three AI modes
 
-1. **recommend** (default): zero tokens unless the user double-clicks the
-   desktop bat after a high alert. The bat runs `tripflare.py ai-review`,
+1. **recommend** (default): zero tokens unless the user clicks the desktop
+   bat (opens the UI alerts page) or the AI 研判 button after a high alert,
    which sends pending warn/high alerts to the AI backend once.
 2. **patrol**: the daemon triggers an immediate patrol on new high alerts
    (10-minute cooldown, alerts merge inside the window) and the

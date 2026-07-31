@@ -60,8 +60,8 @@ they trust with `tripflare.py allow "CN=Some Vendor"`.
 
 ## Three AI modes
 
-1. **recommend** (default): zero tokens unless the user clicks the desktop
-   bat (opens the UI alerts page) or the AI 研判 button after a high alert,
+1. **recommend** (default): zero tokens unless the user clicks AI 研判 in
+   the console UI (or the tray menu / review balloon) after a high alert,
    which sends pending warn/high alerts to the AI backend once.
 2. **patrol**: the daemon triggers an immediate patrol on new high alerts
    (10-minute cooldown, alerts merge inside the window) and the

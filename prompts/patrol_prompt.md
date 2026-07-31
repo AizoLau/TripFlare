@@ -23,10 +23,10 @@ You MAY (and should, when it helps a verdict):
 - compare against the baseline summary provided in the runtime context.
 
 Exception: if the runtime context says `Auto-quarantine allowed: YES`,
-you MAY move a file into `%LOCALAPPDATA%\TripFlare\quarantine\` ONLY when
-confidence is very high (unsigned + random name + persistence + malicious
-reputation). Everything else remains read-only. If it says NO, quarantine
-is forbidden.
+you MAY move a file into the `quarantine\` directory under the TripFlare
+data directory ONLY when confidence is very high (unsigned + random name +
+persistence + malicious reputation). Everything else remains read-only.
+If it says NO, quarantine is forbidden.
 
 ## Output format (mandatory)
 

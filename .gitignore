@@ -11,6 +11,9 @@ quarantine/
 sig_paths.txt
 *.tmp
 
+# Local-only rules for AI sessions (not for the public repo)
+AGENTS.md
+
 # Python
 __pycache__/
 *.pyc

@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="TripFlare Brand Logo">
+  <defs>
+    <linearGradient id="badgeBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0B1120"/>
+      <stop offset="55%" stop-color="#111827"/>
+      <stop offset="100%" stop-color="#172033"/>
+    </linearGradient>
+    <linearGradient id="rimGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#475569"/>
+      <stop offset="50%" stop-color="#334155"/>
+      <stop offset="100%" stop-color="#1E293B"/>
+    </linearGradient>
+    <linearGradient id="wireLeft" x1="96" y1="344" x2="298" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="65%" stop-color="#60A5FA"/>
+      <stop offset="100%" stop-color="#FB923C"/>
+    </linearGradient>
+    <linearGradient id="wireRight" x1="298" y1="236" x2="418" y2="172" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FDBA74"/>
+      <stop offset="55%" stop-color="#F97316"/>
+      <stop offset="100%" stop-color="#EF4444"/>
+    </linearGradient>
+    <radialGradient id="flareHalo" cx="298" cy="236" r="142" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFF7ED" stop-opacity="0.9"/>
+      <stop offset="28%" stop-color="#F97316" stop-opacity="0.58"/>
+      <stop offset="62%" stop-color="#EF4444" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#EF4444" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="starGrad" cx="298" cy="236" r="134" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="24%" stop-color="#FED7AA"/>
+      <stop offset="62%" stop-color="#F97316"/>
+      <stop offset="100%" stop-color="#EA580C"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Rounded dark slate badge with bright border rim for Light/Dark GitHub contrast -->
+  <rect x="24" y="24" width="464" height="464" rx="108" fill="url(#badgeBg)" stroke="url(#rimGrad)" stroke-width="6"/>
+
+  <!-- Inner security perimeter hexagon -->
+  <polygon points="256,74 418,154 418,358 256,438 94,358 94,154"
+           fill="none" stroke="#243247" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="M 222 90 L 256 74 L 290 90" fill="none" stroke="#38BDF8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+  <path d="M 222 422 L 256 438 L 290 422" fill="none" stroke="#38BDF8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+
+  <!-- Soft outer glow behind laser tripwire -->
+  <line x1="96" y1="344" x2="298" y2="236" stroke="#38BDF8" stroke-width="24" stroke-linecap="round" opacity="0.16"/>
+  <line x1="298" y1="236" x2="418" y2="172" stroke="#F97316" stroke-width="24" stroke-linecap="round" opacity="0.18"/>
+
+  <!-- Flare radial halo & perimeter shockwave ring -->
+  <circle cx="298" cy="236" r="142" fill="url(#flareHalo)"/>
+  <circle cx="298" cy="236" r="82" fill="none" stroke="#FB923C" stroke-width="3" stroke-dasharray="16 10" stroke-linecap="round" opacity="0.45"/>
+
+  <!-- Taut diagonal laser tripwire -->
+  <line x1="96" y1="344" x2="298" y2="236" stroke="url(#wireLeft)" stroke-width="10" stroke-linecap="round"/>
+  <line x1="298" y1="236" x2="418" y2="172" stroke="url(#wireRight)" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- Anchor nodes on left and right perimeter -->
+  <circle cx="96" cy="344" r="14" fill="#0B1120" stroke="#38BDF8" stroke-width="5"/>
+  <circle cx="96" cy="344" r="4" fill="#E0F2FE"/>
+  <circle cx="418" cy="172" r="13" fill="#0B1120" stroke="#EF4444" stroke-width="5"/>
+  <circle cx="418" cy="172" r="4" fill="#FEE2E2"/>
+
+  <!-- Secondary 45-degree diagonal flare spikes -->
+  <polygon points="256,194 298,226 340,194 308,236 340,278 298,246 256,278 288,236"
+           fill="#EF4444" opacity="0.72"/>
+
+  <!-- Primary 4-point concave signal flare starburst at (298, 236) -->
+  <path d="M 298 104 Q 310 218 430 236 Q 310 254 298 368 Q 286 254 166 236 Q 286 218 298 104 Z"
+        fill="url(#starGrad)"/>
+
+  <!-- Incandescent white-hot flare core -->
+  <path d="M 298 188 Q 305 229 346 236 Q 305 243 298 284 Q 291 243 250 236 Q 291 229 298 188 Z"
+        fill="#FFF7ED"/>
+  <circle cx="298" cy="236" r="14" fill="#FFFFFF"/>
+</svg>

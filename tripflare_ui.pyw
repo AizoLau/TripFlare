@@ -508,9 +508,14 @@ PALETTE = {
 
 
 def enable_dpi_awareness():
-    """Enable Windows DPI awareness so fonts and widgets stay crisp."""
+    """Enable Windows DPI awareness and taskbar AppUserModelID."""
     if os.name != "nt":
         return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "TripFlare.Console.0.2")
+    except Exception:
+        pass
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
@@ -1090,9 +1095,20 @@ class TripFlareUI(tk.Tk):
 
         brand_row = tk.Frame(left, bg=PALETTE["header_bg"])
         brand_row.pack(anchor="w")
-        tk.Label(brand_row, text="●", bg=PALETTE["header_bg"],
-                 fg=PALETTE["accent"], font=self.title_font).pack(
-            side="left", padx=(0, 6))
+        emblem = tk.Canvas(
+            brand_row, width=26, height=26,
+            bg=PALETTE["header_bg"], highlightthickness=0, bd=0)
+        emblem.create_rectangle(
+            2, 2, 24, 24, fill="#111827", outline="#334155", width=1)
+        emblem.create_line(
+            6, 18, 15, 12, fill="#38BDF8", width=2, capstyle="round")
+        emblem.create_line(
+            15, 12, 21, 8, fill="#EF4444", width=2, capstyle="round")
+        emblem.create_polygon(
+            15, 5, 17, 10, 22, 12, 17, 14, 15, 19, 13, 14, 8, 12, 13, 10,
+            fill="#F97316", outline="")
+        emblem.create_oval(13, 10, 17, 14, fill="#FFF7ED", outline="")
+        emblem.pack(side="left", padx=(0, 8))
         tk.Label(brand_row, text="TripFlare", bg=PALETTE["header_bg"],
                  fg=PALETTE["header_text"], font=self.title_font).pack(
             side="left")

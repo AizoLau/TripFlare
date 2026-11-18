@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.svg" alt="TripFlare Logo" width="96" height="96"/>
+
 # TripFlare
 
 **轻量级 Windows 终端边界绊线监控与 BYOK AI 研判控制台**

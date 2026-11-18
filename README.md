@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.svg" alt="TripFlare Logo" width="96" height="96"/>
+
 # TripFlare
 
 **Lightweight Windows Perimeter Tripwire & BYOK AI Forensic Console**

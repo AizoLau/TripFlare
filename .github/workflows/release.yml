@@ -69,7 +69,7 @@ jobs:
           Move-Item -Force dist/TripFlareTray.exe $bundle/
           Copy-Item -Recurse -Force prompts $bundle/prompts
           Copy-Item -Recurse -Force scripts $bundle/scripts
-          Copy-Item -Force config.default.json, tripflare.ico, README.md, LICENSE $bundle/
+          Copy-Item -Force config.default.json, tripflare.ico, README.md, README_CN.md, LICENSE $bundle/
           $zipName = "TripFlare-$tag-win64-portable.zip"
           Compress-Archive -Path "$bundle/*" -DestinationPath "dist/$zipName" -Force
           $hash = (Get-FileHash "dist/$zipName" -Algorithm SHA256).Hash.ToLower()

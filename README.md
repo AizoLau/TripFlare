@@ -10,7 +10,7 @@
 [![Dependencies](https://img.shields.io/badge/Dependencies-Zero-22c55e)](#why-tripflare)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b.svg)](LICENSE)
 
-**English** · [中文说明](#-中文说明)
+**English** · [简体中文](README_CN.md)
 
 <br/>
 
@@ -177,35 +177,6 @@ For deep module design, threat scoring weights, and file layouts, see [docs/DESI
 - Kernel rootkits, BYOVD drivers, and pre-OS bootkits (user-mode cannot inspect kernel memory).
 - Purely fileless in-memory process injection (`VirtualAllocEx` / shellcode) that never touches disk, registry, tasks, services, or WMI.
 - Encrypted outbound C2 channels (TripFlare deliberately stays lightweight without an NDIS/WFP packet driver).
-
----
-
-## 中文说明
-
-### 为什么需要 TripFlare？
-
-现代 Windows 终端入侵往往不靠已知病毒样本，而是通过**高隐蔽动作**完成驻留：
-- 把系统自带白程序（如 `CertUtil.exe`、`mshta.exe`）伪装重命名为 `Invoice_2026.exe` 放进下载目录执行（**LOLBin 白利用**）
-- 在 `HKCU\...\Run`、启动文件夹、计划任务、系统服务或 WMI 事件订阅中写入静默自启动
-- 向 `%TEMP%`、`AppData` 或浏览器扩展目录写入未签名脚本或加载器
-
-**TripFlare** 采用 **「基线变更 + 异常评分 + 本地/云端 AI 研判」** 的极简架构：
-- **零第三方依赖**：核心引擎 100% 基于 Python 3.8+ 标准库，无任何 `pip` 依赖、无内核驱动、无入站监听端口。
-- **毫秒级实时拌线捕获**：通过 Win32 `ReadDirectoryChangesW` 实时监听 Downloads / Desktop / 启动项 / Temp 等高危目录（空闲 CPU 几乎为 0），叠加 60 秒周期性全量基线比对与 PE 原生文件名检测。
-- **BYOK 多模型 AI 研判**：内置零依赖 HTTP 客户端，开箱支持本地 **Ollama**（完全离线隐私）、任意 **OpenAI 兼容接口**（OpenAI / DeepSeek / Groq / OpenRouter / LM Studio 等）以及本地 **CLI Agent**，直接输出中文可读结论与处置建议。
-- **中英文实时切换**：自动识别 Windows 系统语言，也可通过控制台右上角 `EN / 中文` 按钮一键切换界面与 AI 报告语言。
-
-### 快速开始
-
-- **方式一（免安装便携版，推荐）**：前往 [GitHub Releases](https://github.com/AizoLau/TripFlare/releases) 下载 `TripFlare-v*-win64-portable.zip`，解压后双击 `TripFlare.exe` 即可使用（点击 **初始化基线** -> **启动守护**）。
-- **方式二（源码运行，零依赖）**：
-  ```powershell
-  git clone https://github.com/AizoLau/TripFlare.git
-  cd TripFlare
-  python tripflare.py --init
-  TripFlare.bat
-  ```
-- **开启 AI 研判**：在控制台「配置与白名单」页选择 AI 引擎（`auto` 会自动探测本地 Ollama；或填入任意 OpenAI 兼容 `API Base` 与 `API Key`），保存后点击「AI 研判」即可。
 
 ---
 

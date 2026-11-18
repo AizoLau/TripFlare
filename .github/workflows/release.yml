@@ -1,0 +1,94 @@
+name: Release Windows Portable EXE
+
+env:
+  PYTHONUTF8: '1'
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version label for manual build artifact'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run pre-release tests and smoke checks
+        run: |
+          python -m py_compile tripflare.py tripflare_ui.pyw tripflare_tray.pyw tests/test_core.py
+          python -m unittest discover -s tests -v
+          python tripflare.py --init
+          python tripflare.py --bench
+          python tripflare_ui.pyw --selftest
+          python tripflare_tray.pyw --menutest
+
+      - name: Clean test runtime state before packaging
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue data, config.json, __pycache__
+
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+
+      - name: Build portable Windows executables
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name TripFlare --icon tripflare.ico --paths . --add-data "prompts;prompts" --add-data "tripflare.ico;." --add-data "config.default.json;." tripflare_ui.pyw
+          pyinstaller --noconfirm --clean --onefile --console --name TripFlareDaemon --icon tripflare.ico --paths . --add-data "prompts;prompts" --add-data "config.default.json;." tripflare.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name TripFlareTray --icon tripflare.ico --paths . --add-data "tripflare.ico;." --add-data "config.default.json;." tripflare_tray.pyw
+
+      - name: Assemble portable ZIP and SHA256SUMS
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.tag }}") {
+            $tag = "${{ inputs.tag }}"
+          }
+          if (-not $tag) { $tag = "dev" }
+          $bundle = "dist/TripFlare"
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Move-Item -Force dist/TripFlare.exe $bundle/
+          Move-Item -Force dist/TripFlareDaemon.exe $bundle/
+          Move-Item -Force dist/TripFlareTray.exe $bundle/
+          Copy-Item -Recurse -Force prompts $bundle/prompts
+          Copy-Item -Recurse -Force scripts $bundle/scripts
+          Copy-Item -Force config.default.json, tripflare.ico, README.md, LICENSE $bundle/
+          $zipName = "TripFlare-$tag-win64-portable.zip"
+          Compress-Archive -Path "$bundle/*" -DestinationPath "dist/$zipName" -Force
+          $hash = (Get-FileHash "dist/$zipName" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zipName" | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding ascii
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tripflare-win64-portable
+          path: |
+            dist/TripFlare-*.zip
+            dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/TripFlare-*.zip
+            dist/SHA256SUMS.txt

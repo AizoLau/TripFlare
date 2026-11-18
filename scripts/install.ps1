@@ -2,11 +2,11 @@
 <#
 .SYNOPSIS
   Registers the TripFlare scheduled tasks:
-    TripFlareDaemon - runs tripflare.py (pythonw, windowless) at user logon
-    TripFlarePatrol - runs "tripflare.py patrol-tick" every 30 minutes
-                   (it is a no-op unless ai.mode = "patrol" in config.json)
-    TripFlareTray   - runs tripflare_tray.pyw (system tray agent) at logon,
-                   restarts on failure, and is started immediately
+    TripFlareDaemon - runs TripFlareDaemon.exe or tripflare.py (pythonw) at logon
+    TripFlarePatrol - runs patrol-tick every 30 minutes
+                      (no-op unless ai.mode = "patrol" in config.json)
+    TripFlareTray   - runs TripFlareTray.exe or tripflare_tray.pyw at logon,
+                      restarts on failure, and is started immediately
 #>
 [CmdletBinding()]
 param(
@@ -14,53 +14,84 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$root   = Split-Path -Parent $PSScriptRoot
-$tripflare = Join-Path $root 'tripflare.py'
-if (-not (Test-Path $tripflare)) { throw "tripflare.py not found at $tripflare" }
+$root = Split-Path -Parent $PSScriptRoot
+$daemonExe = Join-Path $root 'TripFlareDaemon.exe'
+$trayExe   = Join-Path $root 'TripFlareTray.exe'
+$useExe    = (Test-Path $daemonExe) -and (Test-Path $trayExe)
 
-# Resolve pythonw.exe (windowless interpreter for background running).
-if (-not $PythonW) {
-    $candidates = @(
-        'C:\ProgramData\miniconda3\pythonw.exe',
-        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\pythonw.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311\pythonw.exe')
-    )
-    foreach ($c in $candidates) { if (Test-Path $c) { $PythonW = $c; break } }
-}
-if (-not $PythonW) {
-    $py = (Get-Command python.exe -ErrorAction SilentlyContinue)
-    if ($py) {
-        $maybe = Join-Path (Split-Path $py.Source) 'pythonw.exe'
-        if (Test-Path $maybe) { $PythonW = $maybe }
-    }
-}
-if (-not $PythonW) { throw 'pythonw.exe not found; pass -PythonW <path>' }
-
-Write-Host "TripFlare : $tripflare"
-Write-Host "PythonW: $PythonW"
-
-$daemonArgs = ('"{0}" "{1}"' -f $PythonW, $tripflare)
-$patrolArgs = ('"{0}" "{1}" patrol-tick' -f $PythonW, $tripflare)
-
-schtasks.exe /create /tn 'TripFlareDaemon' /tr $daemonArgs /sc ONLOGON /f | Out-Host
-schtasks.exe /create /tn 'TripFlarePatrol' /tr $patrolArgs /sc MINUTE /mo 30 /f | Out-Host
-
-# TripFlareTray: logon tray agent with restart-on-failure and no time limit
-# (needs the ScheduledTasks cmdlets for those settings).
-$trayScript = Join-Path $root 'tripflare_tray.pyw'
-if (-not (Test-Path $trayScript)) { throw "tripflare_tray.pyw not found at $trayScript" }
-$trayAction  = New-ScheduledTaskAction -Execute $PythonW -Argument ('"{0}"' -f $trayScript)
-$trayTrigger = New-ScheduledTaskTrigger -AtLogOn
-$traySettings = New-ScheduledTaskSettingsSet -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0 `
+$longSettings = New-ScheduledTaskSettingsSet -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn
+
+if ($useExe) {
+    Write-Host "TripFlare : $daemonExe (portable bundle)"
+    $daemonAction = New-ScheduledTaskAction -Execute $daemonExe
+    $trayAction   = New-ScheduledTaskAction -Execute $trayExe
+    $patrolArgs   = ('"{0}" patrol-tick' -f $daemonExe)
+} else {
+    $tripflare  = Join-Path $root 'tripflare.py'
+    $trayScript = Join-Path $root 'tripflare_tray.pyw'
+    if (-not (Test-Path $tripflare))  { throw "tripflare.py not found at $tripflare" }
+    if (-not (Test-Path $trayScript)) { throw "tripflare_tray.pyw not found at $trayScript" }
+
+    # Resolve pythonw.exe (skip WindowsApps Store alias stubs).
+    if (-not $PythonW) {
+        $candidates = [System.Collections.Generic.List[string]]::new()
+        $candidates.Add('C:\ProgramData\miniconda3\pythonw.exe')
+        $candidates.Add((Join-Path $env:USERPROFILE 'miniconda3\pythonw.exe'))
+        $candidates.Add((Join-Path $env:USERPROFILE 'anaconda3\pythonw.exe'))
+        foreach ($ver in @('313', '312', '311', '310', '39', '38')) {
+            $candidates.Add((Join-Path $env:LOCALAPPDATA ("Programs\Python\Python$ver\pythonw.exe")))
+            $candidates.Add((Join-Path $env:ProgramFiles ("Python$ver\pythonw.exe")))
+        }
+        foreach ($c in $candidates) {
+            if ($c -and (Test-Path $c) -and ($c -notmatch '\\WindowsApps\\')) {
+                $PythonW = $c
+                break
+            }
+        }
+    }
+    if (-not $PythonW) {
+        $pwCmd = Get-Command pythonw.exe -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -and ($_.Source -notmatch '\\WindowsApps\\') } |
+            Select-Object -First 1
+        if ($pwCmd) { $PythonW = $pwCmd.Source }
+    }
+    if (-not $PythonW) {
+        $pyCmd = Get-Command python.exe -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -and ($_.Source -notmatch '\\WindowsApps\\') } |
+            Select-Object -First 1
+        if ($pyCmd) {
+            $maybe = Join-Path (Split-Path $pyCmd.Source) 'pythonw.exe'
+            if (Test-Path $maybe) { $PythonW = $maybe }
+        }
+    }
+    if (-not $PythonW) { throw 'pythonw.exe not found; pass -PythonW <path>' }
+
+    Write-Host "TripFlare : $tripflare"
+    Write-Host "PythonW   : $PythonW"
+    $daemonAction = New-ScheduledTaskAction -Execute $PythonW -Argument ('"{0}"' -f $tripflare)
+    $trayAction   = New-ScheduledTaskAction -Execute $PythonW -Argument ('"{0}"' -f $trayScript)
+    $patrolArgs   = ('"{0}" "{1}" patrol-tick' -f $PythonW, $tripflare)
+}
+
+Register-ScheduledTask -TaskName 'TripFlareDaemon' -Action $daemonAction `
+    -Trigger $logonTrigger -Settings $longSettings -Force | Out-Null
+
+schtasks.exe /create /tn 'TripFlarePatrol' /tr $patrolArgs /sc MINUTE /mo 30 /f | Out-Host
+$patrolSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Set-ScheduledTask -TaskName 'TripFlarePatrol' -Settings $patrolSettings | Out-Null
+
 Register-ScheduledTask -TaskName 'TripFlareTray' -Action $trayAction `
-    -Trigger $trayTrigger -Settings $traySettings -Force | Out-Null
-schtasks.exe /run /tn 'TripFlareTray' | Out-Host
+    -Trigger $logonTrigger -Settings $longSettings -Force | Out-Null
+
+schtasks.exe /run /tn 'TripFlareDaemon' | Out-Host
+schtasks.exe /run /tn 'TripFlareTray'   | Out-Host
 
 Write-Host "`nRegistered tasks:"
 schtasks.exe /query /tn 'TripFlareDaemon' /fo list | Out-Host
 schtasks.exe /query /tn 'TripFlarePatrol' /fo list | Out-Host
-schtasks.exe /query /tn 'TripFlareTray' /fo list | Out-Host
-Write-Host "Done. Daemon/tray run at logon; TripFlareTray was started now."
-Write-Host "Start the daemon immediately with: schtasks /run /tn TripFlareDaemon"
+schtasks.exe /query /tn 'TripFlareTray'   /fo list | Out-Host
+Write-Host "Done. TripFlareDaemon and TripFlareTray are registered for logon and started now."

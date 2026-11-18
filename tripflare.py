@@ -12,6 +12,7 @@ Usage:
     tripflare.py allow <target>  Allowlist a path or a signer substring.
     tripflare.py status          Show configuration and runtime statistics.
     tripflare.py patrol-tick     Scheduled-task entry for AI patrol mode.
+    tripflare.py prune-noise     Clean historical OS/background false alarms.
     tripflare.py --bench         Run one timed round and print stage timings.
 
 Runtime data lives in <script dir>\\data\\ by default (state.json,
@@ -22,20 +23,33 @@ from __future__ import annotations
 
 import csv
 import ctypes
+import ctypes.wintypes as wt
 import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
+
+for _stream_name in ("stdout", "stderr"):
+    _st = getattr(sys, _stream_name, None)
+    if _st is not None and hasattr(_st, "reconfigure"):
+        try:
+            _st.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 # Prevent brief console windows from flashing when the windowless daemon
 # (pythonw) spawns console subprocesses (reg / schtasks / powershell / AI CLI).
@@ -45,7 +59,20 @@ NO_WINDOW_KW = {"creationflags": 0x08000000} if os.name == "nt" else {}
 # Paths and constants
 # --------------------------------------------------------------------------
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FROZEN = getattr(sys, "frozen", False)
+SCRIPT_DIR = (os.path.dirname(os.path.abspath(sys.executable)) if FROZEN
+              else os.path.dirname(os.path.abspath(__file__)))
+RESOURCE_DIR = getattr(sys, "_MEIPASS", SCRIPT_DIR)
+
+
+def resolve_resource_path(name):
+    """Find bundled asset in install dir first, then PyInstaller _MEIPASS."""
+    cand = os.path.join(SCRIPT_DIR, name)
+    if os.path.exists(cand):
+        return cand
+    return os.path.join(RESOURCE_DIR, name)
+
+
 DATA_DIR = os.environ.get("TRIPFLARE_DATA_DIR") or os.path.join(
     SCRIPT_DIR, "data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -54,7 +81,7 @@ READ_ALERTS_PATH = os.path.join(DATA_DIR, "read_alerts.json")
 URGENT_PATH = os.path.join(DATA_DIR, "URGENT.txt")
 LOG_PATH = os.path.join(DATA_DIR, "tripflare.log")
 REVIEWS_DIR = os.path.join(DATA_DIR, "reviews")
-PROMPTS_DIR = os.path.join(SCRIPT_DIR, "prompts")
+PROMPTS_DIR = resolve_resource_path("prompts")
 
 WATCH_EXTS = {".exe", ".dll", ".bat", ".ps1", ".vbs", ".js", ".lnk",
               ".scr", ".com", ".sys", ".cpl", ".ocx"}
@@ -72,6 +99,61 @@ GUID_RE = re.compile(
 EXE_IN_CMD_RE = re.compile(
     r"([A-Za-z]:\\[^\"<>:|?*]+?\.(?:exe|dll|bat|ps1|vbs|js|scr|com))",
     re.IGNORECASE)
+
+# Background OS / updater churn patterns used when system_noise_filter is true.
+PER_USER_SVC_RE = re.compile(r"^(.+)_[0-9A-F]{4,12}$", re.IGNORECASE)
+KNOWN_PER_USER_SERVICES = {
+    "AARSVC", "BCASTDVRUSERSERVICE", "BLUETOOTHUSERSERVICE", "CAPTURESERVICE",
+    "CBDHSVC", "CDPUSERSVC", "CONSENTUXUSERSVC",
+    "CREDENTIALENROLLMENTMANAGERUSERSVC", "DEVICEASSOCIATIONBROKERSVC",
+    "DEVICEPICKERUSERSVC", "DEVICESFLOWUSERSVC", "LXSSMANAGERUSER",
+    "MESSAGINGSERVICE", "NPSMSVC", "ONESYNCSVC", "PENSERVICE",
+    "PIMINDEXMAINTENANCESVC", "PRINTWORKFLOWUSERSVC", "SYNCHOST",
+    "UDKUSERSVC", "UNISTORESVC", "USERDATASVC", "WEBACCOUNTMANAGER",
+    "WPNUSERSERVICE",
+}
+BROWSER_UPDATER_SVCS = (
+    "GOOGLEUPDATER", "MICROSOFTEDGEELEVATIONSERVICE",
+    "GOOGLECHROMEELEVATIONSERVICE", "CHROMOTING",
+)
+SELF_TASK_NAMES = {
+    "\\tripflaredaemon", "\\tripflarepatrol", "\\tripflaretray",
+}
+NOISY_SYSTEM_TASK_PREFIXES = (
+    "\\googlesystem\\googleupdater\\googleupdatertasksystem",
+    "\\microsoft\\edgeupdate\\microsoftedgeupdatetaskmachine",
+)
+SHELL_META_RE = re.compile(
+    r"[&|;><]|\b(?:powershell|pwsh|cmd\.exe|mshta|rundll32|regsvr32|"
+    r"wscript|cscript)\b",
+    re.IGNORECASE,
+)
+ATOMIC_TMP_JS_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"\.tmp\.(?:js|ps1|bat)$",
+    re.IGNORECASE,
+)
+PS_POLICY_TEST_RE = re.compile(
+    r"^__psscriptpolicytest_.*\.(?:ps1|psm1)$", re.IGNORECASE)
+EDGE_TEMP_INSTALLER_RE = re.compile(
+    r"^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?-"
+    r"(?:microsoftedge|msedge)",
+    re.IGNORECASE,
+)
+TEMP_TRANSIENT_MS_PREFIXES = (
+    "microsoftedge", "mpam-", "mpcmdrun", "windowsupdate",
+)
+KNOWN_DISM_FILES = {
+    "appxprovider.dll", "assocprovider.dll", "cbsprovider.dll",
+    "dismcore.dll", "dismcoreps.dll", "dismhost.exe", "dismprov.dll",
+    "dmiprovider.dll", "ffuprovider.dll", "folderprovider.dll",
+    "genericprovider.dll", "ibsprovider.dll", "imagingprovider.dll",
+    "intlprovider.dll", "logprovider.dll", "msiprovider.dll",
+    "offlinesetupprovider.dll", "osprovider.dll", "provprovider.dll",
+    "setupplatformprovider.dll", "smiprovider.dll", "sysprepprovider.dll",
+    "transmogprovider.dll", "unattendprovider.dll", "vhdprovider.dll",
+    "wimprovider.dll",
+}
 
 RUN_KEYS = [
     r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -93,7 +175,10 @@ SERVICES_KEY = r"HKLM\SYSTEM\CurrentControlSet\Services"
 
 # Processes that must never trigger self-alerts (TripFlare itself, its AI
 # backend, and the helper tools it spawns every round).
-OWN_PROCESS_NAMES = {"python.exe", "pythonw.exe", "python3.exe", "kimi.exe"}
+OWN_PROCESS_NAMES = {
+    "python.exe", "pythonw.exe", "python3.exe", "kimi.exe",
+    "tripflare.exe", "tripflaredaemon.exe", "tripflaretray.exe",
+}
 HELPER_PROCESS_NAMES = {
     "powershell.exe", "pwsh.exe", "cmd.exe", "reg.exe", "schtasks.exe",
     "conhost.exe", "tasklist.exe", "wmic.exe", "whoami.exe", "systeminfo.exe",
@@ -105,18 +190,25 @@ HELPER_PROCESS_NAMES = {
 }
 
 DEFAULT_CONFIG = {
+    "language": "auto",              # auto | en | zh
     "interval_seconds": 60,
+    "realtime_watch": True,          # ReadDirectoryChangesW instant watch
     "heavy_interval_rounds": 5,      # services/tasks/IFEO every N rounds
     "sha1_max_bytes": 52428800,      # skip hashing files larger than 50 MB
     "max_dir_entries": 20000,        # skip a directory with more entries
     "state_process_cap": 5000,       # bound the seen-process table
+    "system_noise_filter": True,     # filter noisy OS/background churn
     "score_thresholds": {"warn": 3, "high": 7},
     "allowlist": {"paths": [], "signers": []},
     "exclude_dirs": [],
     "watch_dirs": None,              # None -> built-in defaults
     "ai": {
         "mode": "recommend",         # recommend | patrol | off
-        "backend_path": "auto",      # "auto" -> detect kimi.exe
+        "provider": "auto",          # auto | ollama | openai | cli
+        "api_base": "",              # optional base URL for Ollama / OpenAI
+        "api_key": "",               # optional API key (or env var)
+        "model": "",                 # optional model name override
+        "backend_path": "auto",      # "auto" -> detect kimi.exe (cli mode)
         "backend_args": ["-p", "{prompt}"],
         "timeout_seconds": 600,
         "max_calls_per_day": 20,
@@ -380,16 +472,102 @@ def mark_alerts_read(ids):
     return added
 
 
+def unmark_alerts_read(ids):
+    """Remove ids from the read set. Returns number removed."""
+    drop = set(str(i) for i in ids)
+    if not drop:
+        return 0
+    read_list = []
+    removed = 0
+    try:
+        with open(READ_ALERTS_PATH, "r", encoding="utf-8") as fh:
+            for x in json.load(fh).get("read", []):
+                sx = str(x)
+                if sx in drop:
+                    removed += 1
+                else:
+                    read_list.append(sx)
+    except (OSError, ValueError):
+        return 0
+    if removed:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(READ_ALERTS_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"read": read_list[-5000:]}, fh, ensure_ascii=False)
+    return removed
+
+
 def unread_alerts(alerts):
     read = load_read_ids()
     return [a for a in alerts if alert_id(a) not in read]
 
 
+def unread_warn_high_alerts():
+    """Return (all_unread_warn_high, total_warn_high_count)."""
+    candidates = read_alerts(levels={"warn", "high"})
+    return unread_alerts(candidates), len(candidates)
+
+
 def pending_review_alerts(cap):
     """Unread warn/high alerts awaiting AI review (newest-first capped)."""
-    candidates = read_alerts(levels={"warn", "high"})
-    pending = unread_alerts(candidates)
-    return pending[-cap:], len(candidates)
+    pending, total = unread_warn_high_alerts()
+    return pending[-cap:], total
+
+
+def alert_matches_allowlist(alert, cfg):
+    """True when an alert's path, target command, or signer is allowlisted."""
+    path = alert.get("path") or ""
+    if path and is_allowed_path(path, cfg):
+        return True
+    extra = alert.get("extra") or {}
+    for key in ("target", "data", "image", "debugger"):
+        val = extra.get(key)
+        if not val:
+            continue
+        m = EXE_IN_CMD_RE.search(val)
+        cand = m.group(1) if m else val
+        if is_allowed_path(cand, cfg):
+            return True
+    if alert.get("sig_status") == "Valid":
+        signer_l = (alert.get("signer") or "").lower()
+        allowed = [s.lower() for s in cfg.get("allowlist", {}).get("signers", [])]
+        if signer_l and any(a in signer_l for a in allowed):
+            return True
+    return False
+
+
+def cleanup_allowlisted_alerts(cfg, delete_records=False):
+    """Mark read or remove existing alerts matching current allowlist rules.
+
+    Returns number of matched alerts processed.
+    """
+    alerts = read_alerts()
+    matched = [a for a in alerts if alert_matches_allowlist(a, cfg)]
+    if not matched:
+        return 0
+    if not delete_records:
+        mark_alerts_read([alert_id(a) for a in matched])
+        return len(matched)
+    matched_ids = set(alert_id(a) for a in matched)
+    kept_lines = []
+    if os.path.exists(ALERTS_PATH):
+        with open(ALERTS_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    a = json.loads(raw)
+                except ValueError:
+                    kept_lines.append(raw)
+                    continue
+                if alert_id(a) not in matched_ids:
+                    kept_lines.append(json.dumps(a, ensure_ascii=False))
+        tmp = ALERTS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            if kept_lines:
+                fh.write("\n".join(kept_lines) + "\n")
+        os.replace(tmp, ALERTS_PATH)
+    return len(matched)
 
 
 def append_urgent(text):
@@ -453,6 +631,43 @@ def windowless_python():
     return shutil.which("pythonw.exe") or exe
 
 
+def daemon_cmd(*args):
+    """Command list to launch tripflare daemon/CLI (source or frozen)."""
+    exe = os.path.join(SCRIPT_DIR, "TripFlareDaemon.exe")
+    if FROZEN and os.path.exists(exe):
+        return [exe] + list(args)
+    return [console_python(), os.path.join(SCRIPT_DIR, "tripflare.py")] + list(args)
+
+
+def ui_cmd(*args):
+    """Command list to launch TripFlare console UI (source or frozen)."""
+    exe = os.path.join(SCRIPT_DIR, "TripFlare.exe")
+    if FROZEN and os.path.exists(exe):
+        return [exe] + list(args)
+    return [windowless_python(),
+            os.path.join(SCRIPT_DIR, "tripflare_ui.pyw")] + list(args)
+
+
+def detect_system_language():
+    """Return 'zh' on Chinese Windows UI locales, else 'en'."""
+    if os.name == "nt":
+        try:
+            lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+            return "zh" if (lang_id & 0xFF) == 0x04 else "en"
+        except (OSError, AttributeError):
+            pass
+    lang_env = (os.environ.get("LANG") or "").lower()
+    return "zh" if lang_env.startswith("zh") else "en"
+
+
+def resolve_language(cfg=None):
+    """Resolve active language ('zh' or 'en') from config or OS locale."""
+    val = ((cfg or {}).get("language") or "auto").strip().lower()
+    if val in ("zh", "en"):
+        return val
+    return detect_system_language()
+
+
 def write_desktop_bat():
     """(Re)create the one-click launcher that opens the UI alerts page."""
     bat_path = desktop_bat_path()
@@ -476,12 +691,24 @@ def write_desktop_bat():
 # --------------------------------------------------------------------------
 
 def long_path(path):
-    """Expand 8.3 short names (e.g. ADMINI~1) so path dedupe is stable."""
+    """Expand 8.3 short names (e.g. ADMINI~1) even when leaf file is gone."""
+    s = str(path)
     try:
         buf = ctypes.create_unicode_buffer(1024)
-        n = ctypes.windll.kernel32.GetLongPathNameW(str(path), buf, 1024)
+        n = ctypes.windll.kernel32.GetLongPathNameW(s, buf, 1024)
         if 0 < n < 1024:
             return buf.value
+        tail = []
+        cur = norm(s)
+        while cur:
+            parent, name = os.path.split(cur)
+            if not name or parent == cur:
+                break
+            tail.append(name)
+            cur = parent
+            n = ctypes.windll.kernel32.GetLongPathNameW(cur, buf, 1024)
+            if 0 < n < 1024:
+                return os.path.join(buf.value, *reversed(tail))
     except (OSError, AttributeError, ValueError):
         pass
     return path
@@ -534,6 +761,70 @@ def risky_roots():
     return [norm_lower(long_path(r)) + os.sep for r in roots]
 
 
+def temp_roots():
+    """Normalized Temp directory roots with trailing separator."""
+    up = os.path.expanduser("~")
+    local = os.environ.get("LOCALAPPDATA", os.path.join(up, "AppData", "Local"))
+    cands = [
+        os.environ.get("TEMP", ""),
+        os.environ.get("TMP", ""),
+        os.path.join(local, "Temp"),
+    ]
+    seen = []
+    for c in cands:
+        if not c:
+            continue
+        r = norm_lower(long_path(c)).rstrip(os.sep) + os.sep
+        if r not in seen:
+            seen.append(r)
+    return seen
+
+
+def is_in_temp(path):
+    """True when path resides under the user's Temp directory."""
+    low = norm_lower(long_path(path))
+    return any(low.startswith(r) for r in temp_roots())
+
+
+def _temp_rel_parts(path):
+    """Return path components relative to Temp root, or None if outside Temp."""
+    low = norm_lower(long_path(path))
+    for root in temp_roots():
+        if low.startswith(root):
+            rel = low[len(root):]
+            return [p for p in rel.split(os.sep) if p]
+    return None
+
+
+def is_in_temp_guid_dir(path):
+    """True when path is inside a GUID-named subfolder under Temp."""
+    parts = _temp_rel_parts(path)
+    if not parts or len(parts) < 2:
+        return False
+    return any(GUID_RE.fullmatch(comp) for comp in parts[:-1])
+
+
+def is_in_temp_mei_dir(path):
+    """True when path is inside a PyInstaller _MEI* folder under Temp."""
+    parts = _temp_rel_parts(path)
+    if not parts or len(parts) < 2:
+        return False
+    return any(comp.startswith("_mei") for comp in parts[:-1])
+
+
+def is_temp_direct_atomic_noise(path):
+    """True for ephemeral PowerShell probes or UUID .tmp.js files in Temp."""
+    parts = _temp_rel_parts(path)
+    if not parts:
+        return False
+    base = os.path.basename(path)
+    if PS_POLICY_TEST_RE.match(base):
+        return True
+    if len(parts) <= 2 and ATOMIC_TMP_JS_RE.match(base):
+        return True
+    return False
+
+
 def get_exclusions(cfg):
     excl = [norm_lower(DATA_DIR)]
     for item in cfg.get("exclude_dirs") or []:
@@ -542,10 +833,92 @@ def get_exclusions(cfg):
 
 
 # --------------------------------------------------------------------------
-# Scoring
+# Scoring & PE metadata checks
 # --------------------------------------------------------------------------
 
-def name_location_score(path):
+def is_random_alnum_stem(stem):
+    """True when stem resembles a machine-generated random ASCII token.
+
+    Rejects non-ASCII (e.g. CJK filenames) and plain dictionary/version words
+    such as INSTALL, PREOPEN, TAIKOU2, SETUP64.
+    """
+    if not stem or not stem.isascii():
+        return False
+    if stem.isalpha():
+        return len(stem) >= 6 and not re.search(r"[aeiouyAEIOUY]", stem)
+    if 6 <= len(stem) <= 12 and stem.isalnum():
+        has_alpha = any(c.isalpha() for c in stem)
+        has_digit = any(c.isdigit() for c in stem)
+        if not (has_alpha and has_digit):
+            return False
+        m_word = re.fullmatch(
+            r"([A-Za-z]{4,})(?:[0-9]{1,2}|32|64|86|128)", stem)
+        if m_word and re.search(r"[aeiouyAEIOUY]", m_word.group(1)):
+            return False
+        transitions = sum(
+            1 for a, b in zip(stem, stem[1:])
+            if a.isalpha() != b.isalpha()
+        )
+        alpha_only = "".join(c for c in stem if c.isalpha())
+        if transitions >= 2:
+            return True
+        if alpha_only and not re.search(r"[aeiouyAEIOUY]", alpha_only):
+            return True
+    return False
+
+
+def has_random_stem(path):
+    """True when the file's basename stem looks randomly generated."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return is_random_alnum_stem(stem)
+
+
+def has_guid_dir_component(path):
+    """Return the first GUID-named parent directory component, or None."""
+    for comp in norm(path).split(os.sep)[:-1]:
+        if GUID_RE.fullmatch(comp):
+            return comp
+    return None
+
+
+def is_microsoft_signer(signer):
+    """True when Authenticode subject belongs to Microsoft Corporation."""
+    low = (signer or "").lower()
+    return ("o=microsoft corporation" in low
+            and ("cn=microsoft windows" in low
+                 or "cn=microsoft corporation" in low))
+
+
+def check_original_filename(path, orig_filename):
+    """Compare on-disk filename against PE FileVersionInfo.OriginalFilename.
+
+    Returns 'match', 'mismatch', or 'unknown'.
+    """
+    orig = (orig_filename or "").strip().lower()
+    if not orig:
+        return "unknown"
+    if orig.endswith(".mui"):
+        orig = orig[:-4]
+    orig_stem, _ = os.path.splitext(orig)
+    if not orig_stem:
+        return "unknown"
+    disk = os.path.basename(path).lower()
+    disk = re.sub(
+        r"^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
+        r"[0-9a-f]{12}\}?-",
+        "", disk,
+    )
+    disk_stem, _ = os.path.splitext(disk)
+    disk_stem = re.sub(r"\s*\(\d+\)$", "", disk_stem)
+    if disk_stem == orig_stem:
+        return "match"
+    if (len(orig_stem) >= 6 and disk_stem.startswith(orig_stem)
+            and re.match(r"^[_.\-0-9x]", disk_stem[len(orig_stem):])):
+        return "match"
+    return "mismatch"
+
+
+def name_location_score(path, allow_temp_guid=False, allow_masq_signed=False):
     """Score a path by name and location heuristics.
 
     Returns (score, reasons). Name-based hits are a single rule group
@@ -555,25 +928,26 @@ def name_location_score(path):
     reasons = []
     stem = os.path.splitext(os.path.basename(path))[0]
     name_hits = []
-    if RANDOM_RE.match(stem):
-        name_hits.append("random-looking name '%s'" % stem)
-    elif len(stem) >= 6 and stem.isalpha() and not re.search(
-            r"[aeiouAEIOU]", stem):
-        name_hits.append("vowel-less random-looking name '%s'" % stem)
-    for comp in norm(path).split(os.sep):
-        if GUID_RE.fullmatch(comp):
-            name_hits.append("inside GUID-named directory '%s'" % comp)
-            break
+    if is_random_alnum_stem(stem):
+        if stem.isalpha():
+            name_hits.append("vowel-less random-looking name '%s'" % stem)
+        else:
+            name_hits.append("random-looking name '%s'" % stem)
+    if not (allow_temp_guid and is_in_temp(path)):
+        guid_comp = has_guid_dir_component(path)
+        if guid_comp:
+            name_hits.append("inside GUID-named directory '%s'" % guid_comp)
     if name_hits:
         score += 3
         reasons.append("; ".join(name_hits) + " (+3)")
     base = os.path.basename(path).lower()
-    if (any(base.startswith(p) for p in MASQ_PREFIXES)
+    if (not allow_masq_signed
+            and any(base.startswith(p) for p in MASQ_PREFIXES)
             and not norm_lower(path).startswith("c:" + os.sep + "windows")):
         score += 4
         reasons.append("masquerades as a runtime library name outside "
                        "the Windows directory (+4)")
-    low = norm_lower(path)
+    low = norm_lower(long_path(path))
     if any(low.startswith(r) for r in risky_roots()):
         score += 2
         reasons.append("located in a high-risk drop zone "
@@ -584,7 +958,7 @@ def name_location_score(path):
     return score, reasons
 
 
-def signature_score(sig_status, signer, cfg):
+def signature_score(sig_status, signer, cfg, trust_ms=False):
     """Score Authenticode results: +3 unsigned/invalid, +2 unknown signer."""
     score = 0
     reasons = []
@@ -593,6 +967,8 @@ def signature_score(sig_status, signer, cfg):
     if sig_status != "Valid":
         score += 3
         reasons.append("unsigned or invalid signature (%s) (+3)" % sig_status)
+        return score, reasons
+    if trust_ms and is_microsoft_signer(signer):
         return score, reasons
     allowed = [s.lower() for s in cfg["allowlist"].get("signers", [])]
     signer_l = (signer or "").lower()
@@ -613,9 +989,9 @@ def level_for_score(score, cfg):
 
 
 def is_allowed_path(path, cfg):
-    low = norm_lower(path)
+    low = norm_lower(long_path(path))
     for entry in cfg["allowlist"].get("paths", []):
-        e = norm_lower(os.path.expandvars(entry))
+        e = norm_lower(long_path(os.path.expandvars(entry)))
         if low == e or low.startswith(e.rstrip(os.sep) + os.sep):
             return True
         if os.sep not in e and os.path.basename(low) == e:
@@ -675,7 +1051,7 @@ def sha1_of(path, max_bytes):
 # --------------------------------------------------------------------------
 
 def batch_sign(paths, timeout=300):
-    """Return {path: (status, signer)} using one PowerShell process."""
+    """Return {path: (status, signer, orig_filename)} via one PowerShell."""
     result = {}
     if not paths:
         return result
@@ -693,21 +1069,29 @@ def batch_sign(paths, timeout=300):
         "    $s = Get-AuthenticodeSignature -LiteralPath $p -ErrorAction Stop\n"
         "    $signer = ''\n"
         "    if ($s.SignerCertificate) {"
-        " $signer = $s.SignerCertificate.Subject }\n"
+        " $signer = ($s.SignerCertificate.Subject -replace '[\\r\\n\\t]+', ' ') }\n"
+        "    $orig = ''\n"
+        "    try {\n"
+        "      $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($p)\n"
+        "      if ($vi -and $vi.OriginalFilename) {"
+        " $orig = ($vi.OriginalFilename -replace '[\\r\\n\\t]+', ' ').Trim() }\n"
+        "    } catch {}\n"
         "    Write-Output ($p + \"`t\" + $s.Status.ToString()"
-        " + \"`t\" + $signer)\n"
+        " + \"`t\" + $signer + \"`t\" + $orig)\n"
         "  } catch {\n"
-        "    Write-Output ($p + \"`tError`t\")\n"
+        "    Write-Output ($p + \"`tError`t`t\")\n"
         "  }\n"
         "}\n" % ps_list)
     rc, out = run_ps(script, timeout=timeout)
     if rc == -1:
         log("signature batch failed: %s" % out[:300])
         return result
+    path_set = set(paths)
     for line in out.splitlines():
-        parts = line.rstrip("\r").split("\t")
-        if len(parts) >= 3 and parts[0] in paths:
-            result[parts[0]] = (parts[1].strip(), parts[2].strip())
+        parts = line.rstrip("\r\n").split("\t")
+        if len(parts) >= 3 and parts[0] in path_set:
+            orig = parts[3].strip() if len(parts) >= 4 else ""
+            result[parts[0]] = (parts[1].strip(), parts[2].strip(), orig)
     try:
         os.remove(list_file)
     except OSError:
@@ -761,10 +1145,16 @@ def scan_files(state, cfg, events):
     """Diff the watched directories against state['files']."""
     exclusions = get_exclusions(cfg)
     max_entries = int(cfg.get("max_dir_entries", 20000))
+    use_filter = bool(cfg.get("system_noise_filter", True))
+    st_dirs = startup_dirs()
     current = {}
     for root, depth in get_watch_dirs(cfg):
         for path, size, mtime in walk_limited(root, depth, max_entries,
                                               exclusions):
+            if (use_filter and is_temp_direct_atomic_noise(path)
+                    and norm_lower(os.path.dirname(path)) not in st_dirs
+                    and not is_hidden_file(path)):
+                continue
             current[path] = (size, mtime)
     old = state.get("files", {})
     for path, (size, mtime) in current.items():
@@ -781,7 +1171,7 @@ def scan_files(state, cfg, events):
         ev = {
             "type": kind,
             "path": path,
-            "persistence": norm_lower(os.path.dirname(path)) in startup_dirs(),
+            "persistence": norm_lower(os.path.dirname(path)) in st_dirs,
             "needs_sig": ext in SIGN_EXTS,
             "sha1": sha1_of(path, int(cfg.get("sha1_max_bytes", 52428800))),
             "hidden": is_hidden_file(path),
@@ -825,9 +1215,33 @@ def score_registry_target(data):
     return score, reasons, target
 
 
+def _is_noisy_runonce_edge_cleanup(key, name, data):
+    """True for Microsoft Edge auto-update RunOnce cleanup inside Program Files."""
+    if "\\runonce" not in key.lower():
+        return False
+    if not re.fullmatch(r"msedge_cleanup_\{[0-9a-f-]+\}", name, re.IGNORECASE):
+        return False
+    if not data or SHELL_META_RE.search(data):
+        return False
+    m = EXE_IN_CMD_RE.search(data)
+    if not m:
+        return False
+    exe = norm_lower(long_path(m.group(1)))
+    pf = norm_lower(long_path(
+        os.environ.get("ProgramFiles", r"C:\Program Files")))
+    pf86 = norm_lower(long_path(
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")))
+    edge_roots = (
+        pf.rstrip(os.sep) + os.sep + "microsoft" + os.sep + "edge",
+        pf86.rstrip(os.sep) + os.sep + "microsoft" + os.sep + "edge",
+    )
+    return any(exe.startswith(r) for r in edge_roots)
+
+
 def scan_registry_light(state, cfg, events):
     """Run/RunOnce keys (new or changed values) and Winlogon values."""
     reg_state = state.setdefault("registry", {})
+    use_filter = bool(cfg.get("system_noise_filter", True))
     for key in RUN_KEYS:
         values = reg_query_values(key)
         if values is None:
@@ -842,6 +1256,8 @@ def scan_registry_light(state, cfg, events):
             else:
                 continue
             if is_allowed_path(data, cfg):
+                continue
+            if use_filter and _is_noisy_runonce_edge_cleanup(key, name, data):
                 continue
             events.append({
                 "type": kind,
@@ -909,7 +1325,13 @@ def scan_tasks(state, cfg, events):
     except csv.Error:
         return
     prev = set(state.get("tasks", []))
+    use_filter = bool(cfg.get("system_noise_filter", True))
     for name in sorted(names - prev):
+        low = name.lower()
+        if low in SELF_TASK_NAMES:
+            continue
+        if use_filter and low.startswith(NOISY_SYSTEM_TASK_PREFIXES):
+            continue
         events.append({
             "type": "task_new",
             "path": "schtasks:%s" % name,
@@ -922,24 +1344,98 @@ def scan_tasks(state, cfg, events):
     state["tasks"] = sorted(names)
 
 
+def _short_svc_name(name):
+    """Strip HKLM\\...\\Services\\ prefix so service names stay concise."""
+    up = (name or "").upper()
+    for prefix in (
+        "HKEY_LOCAL_MACHINE\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\",
+        "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\",
+    ):
+        if up.startswith(prefix):
+            return up[len(prefix):]
+    return up
+
+
+def _short_ifeo_name(name):
+    """Strip HKLM\\...\\Image File Execution Options\\ prefix."""
+    up = (name or "").upper()
+    for prefix in (
+        "HKEY_LOCAL_MACHINE\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\"
+        "CURRENTVERSION\\IMAGE FILE EXECUTION OPTIONS\\",
+        "HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\"
+        "CURRENTVERSION\\IMAGE FILE EXECUTION OPTIONS\\",
+    ):
+        if up.startswith(prefix):
+            return up[len(prefix):]
+    return up
+
+
+def _norm_svc_image(image):
+    return re.sub(r"\s+", " ", (image or "").strip().strip('"')).lower()
+
+
+def _is_system32_per_user_image(image):
+    if not image or SHELL_META_RE.search(image):
+        return False
+    low = _norm_svc_image(image)
+    return ("\\windows\\system32\\svchost.exe" in low
+            or "%systemroot%\\system32\\svchost.exe" in low
+            or "\\windows\\system32\\credentialenrollmentmanager.exe" in low
+            or "%systemroot%\\system32\\credentialenrollmentmanager.exe" in low)
+
+
+def _is_program_files_service_image(image):
+    if not image or SHELL_META_RE.search(image):
+        return False
+    m = EXE_IN_CMD_RE.search(image)
+    if not m:
+        return False
+    exe = norm_lower(long_path(m.group(1)))
+    pf = norm_lower(long_path(
+        os.environ.get("ProgramFiles", r"C:\Program Files")))
+    pf86 = norm_lower(long_path(
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")))
+    in_pf = (exe.startswith(pf.rstrip(os.sep) + os.sep)
+             or exe.startswith(pf86.rstrip(os.sep) + os.sep))
+    return in_pf and os.path.exists(exe)
+
+
 def scan_services(state, cfg, events):
     """Diff service ImagePath values (heavy round)."""
     rc, out = run_cmd(["reg", "query", SERVICES_KEY, "/s", "/v", "ImagePath"],
                       timeout=180)
     if rc != 0:
         return
-    current = {}
+    raw_current = {}
     cur_key = None
-    prefix = SERVICES_KEY.upper() + "\\"
     for line in out.splitlines():
         if line.upper().startswith("HKEY"):
             cur_key = line.strip()
         elif cur_key:
             m = re.match(r"^\s{4}(ImagePath)\s{2,}(REG_\w+)\s{2,}(.*)$", line)
             if m:
-                name = cur_key.upper().replace(prefix, "")
-                current[name] = m.group(3).strip()
-    prev = state.get("services", {})
+                name = _short_svc_name(cur_key)
+                raw_current[name] = m.group(3).strip()
+    prev = {_short_svc_name(k): v
+            for k, v in (state.get("services", {}) or {}).items()}
+    use_filter = bool(cfg.get("system_noise_filter", True))
+    current = {}
+    for name, image in raw_current.items():
+        if use_filter:
+            m_user = PER_USER_SVC_RE.match(name)
+            if m_user:
+                base = m_user.group(1).upper()
+                img_n = _norm_svc_image(image)
+                matches_tpl = (
+                    (base in raw_current
+                     and _norm_svc_image(raw_current[base]) == img_n)
+                    or (base in prev and _norm_svc_image(prev[base]) == img_n)
+                )
+                known_sys = (base in KNOWN_PER_USER_SERVICES
+                             and _is_system32_per_user_image(image))
+                if matches_tpl or known_sys:
+                    continue
+        current[name] = image
     for name, image in current.items():
         if name not in prev:
             kind, changed = "service_new", False
@@ -949,6 +1445,9 @@ def scan_services(state, cfg, events):
             continue
         m = EXE_IN_CMD_RE.search(image)
         if m and is_allowed_path(m.group(1), cfg):
+            continue
+        if (use_filter and name.startswith(BROWSER_UPDATER_SVCS)
+                and _is_program_files_service_image(image)):
             continue
         events.append({
             "type": kind,
@@ -969,7 +1468,6 @@ def scan_ifeo(state, cfg, events):
     current = {}
     if rc == 0:
         cur_key = None
-        prefix = IFEO_KEY.upper() + "\\"
         for line in out.splitlines():
             if line.upper().startswith("HKEY"):
                 cur_key = line.strip()
@@ -977,9 +1475,10 @@ def scan_ifeo(state, cfg, events):
                 m = re.match(r"^\s{4}(Debugger)\s{2,}(REG_\w+)\s{2,}(.*)$",
                              line)
                 if m:
-                    name = cur_key.upper().replace(prefix, "")
+                    name = _short_ifeo_name(cur_key)
                     current[name] = m.group(3).strip()
-    prev = state.get("ifeo", {})
+    prev = {_short_ifeo_name(k): v
+            for k, v in (state.get("ifeo", {}) or {}).items()}
     for name, debugger in current.items():
         if prev.get(name) == debugger:
             continue
@@ -1011,7 +1510,7 @@ def snapshot_processes():
     for line in out.splitlines():
         parts = line.rstrip("\r").split("\t")
         if len(parts) >= 4 and parts[3]:
-            procs[norm(parts[3])] = (parts[0], parts[1], parts[2])
+            procs[norm(long_path(parts[3]))] = (parts[0], parts[1], parts[2])
     return procs
 
 
@@ -1067,23 +1566,77 @@ def scan_processes(state, cfg, events):
 # Event scoring and alert handling
 # --------------------------------------------------------------------------
 
+def _is_transient_ms_temp_noise(ev, sig_status, signer, orig_check):
+    """True for benign Windows/Microsoft transient Temp extractions."""
+    if (ev.get("persistence") or ev.get("hidden")
+            or sig_status != "Valid" or not is_microsoft_signer(signer)
+            or has_random_stem(ev["path"]) or orig_check == "mismatch"
+            or not is_in_temp(ev["path"])):
+        return False
+    base = os.path.basename(ev["path"]).lower()
+    if is_in_temp_guid_dir(ev["path"]):
+        return True
+    if any(base.startswith(p) for p in MASQ_PREFIXES):
+        return True
+    if (EDGE_TEMP_INSTALLER_RE.match(base)
+            or any(base.startswith(p) for p in TEMP_TRANSIENT_MS_PREFIXES)):
+        return True
+    return False
+
+
 def finalize_scores(events, cfg):
-    """Batch-verify signatures, then compute the final score per event."""
+    """Batch-verify signatures, filter OS noise, and compute final scores."""
     pending = [e["path"] for e in events
                if e.get("needs_sig") and os.path.exists(e["path"])]
     signatures = batch_sign(sorted(set(pending))) if pending else {}
+    use_filter = bool(cfg.get("system_noise_filter", True))
+    kept = []
     for ev in events:
+        sig_status = signer = None
+        orig_name = ""
+        orig_check = "unknown"
+        if ev.get("needs_sig"):
+            sig_info = signatures.get(ev["path"], (None, None, ""))
+            sig_status = sig_info[0]
+            signer = sig_info[1]
+            orig_name = sig_info[2] if len(sig_info) >= 3 else ""
+            orig_check = check_original_filename(ev["path"], orig_name)
+        if use_filter and _is_transient_ms_temp_noise(
+                ev, sig_status, signer, orig_check):
+            continue
+        ms_valid = (sig_status == "Valid" and is_microsoft_signer(signer))
+        allow_temp_guid = bool(
+            use_filter and sig_status == "Valid"
+            and not has_random_stem(ev["path"])
+            and orig_check != "mismatch"
+        )
+        allow_masq_signed = bool(
+            use_filter and ms_valid and orig_check != "mismatch"
+        )
+        trust_ms = bool(
+            use_filter and ms_valid and not ev.get("persistence")
+            and not has_random_stem(ev["path"])
+            and orig_check != "mismatch"
+        )
         score = 0
         reasons = []
-        s, r = name_location_score(ev["path"])
+        s, r = name_location_score(
+            ev["path"],
+            allow_temp_guid=allow_temp_guid,
+            allow_masq_signed=allow_masq_signed,
+        )
         score += s
         reasons.extend(r)
-        sig_status = signer = None
         if ev.get("needs_sig"):
-            sig_status, signer = signatures.get(ev["path"], (None, None))
-            s, r = signature_score(sig_status, signer, cfg)
+            s, r = signature_score(sig_status, signer, cfg, trust_ms=trust_ms)
             score += s
             reasons.extend(r)
+            if ms_valid and orig_check == "mismatch":
+                score += 3
+                reasons.append(
+                    "renamed signed system binary (OriginalFilename: %s) (+3)"
+                    % orig_name
+                )
         if ev.get("persistence"):
             score += 3
             reasons.append("creates or modifies a persistence mechanism (+3)")
@@ -1108,12 +1661,16 @@ def finalize_scores(events, cfg):
         ev["reasons"] = reasons
         ev["sig_status"] = sig_status
         ev["signer"] = signer
+        if orig_name:
+            ev["orig_filename"] = orig_name
+        kept.append(ev)
+    events[:] = kept
 
 
 def handle_events(events, state, cfg):
-    """Dedupe, persist alerts and fire high-severity actions."""
+    """Dedupe, persist alerts and fire coalesced high-severity actions."""
     alerted = state.setdefault("alerted", {})
-    new_high = False
+    high_events = []
     for ev in events:
         if ev.get("score") is None:
             continue
@@ -1130,8 +1687,24 @@ def handle_events(events, state, cfg):
         log("alert %s score=%d %s %s" % (ev["level"], ev["score"],
                                          ev["type"], ev["path"]))
         if ev["level"] == "high":
-            new_high = True
-            escalate_high(ev, cfg)
+            high_events.append(ev)
+            escalate_high(ev, cfg, notify=False)
+    if high_events and cfg.get("notify", {}).get("balloon", True):
+        if len(high_events) == 1:
+            ev0 = high_events[0]
+            notify_balloon(
+                "TripFlare 高危异常",
+                "%s · 风险分 %d" % (
+                    os.path.basename(ev0["path"]), ev0["score"]),
+            )
+        else:
+            top = max(high_events, key=lambda e: e.get("score", 0))
+            notify_balloon(
+                "TripFlare 高危异常 (%d 条)" % len(high_events),
+                "%s 等 %d 项高危异常（最高分 %d）" % (
+                    os.path.basename(top["path"]),
+                    len(high_events), top.get("score", 0)),
+            )
     # Prune dedupe memory older than 30 days.
     if len(alerted) > 20000:
         cutoff = time.time() - 30 * 86400
@@ -1142,7 +1715,7 @@ def handle_events(events, state, cfg):
                 when = 0
             if when < cutoff:
                 del alerted[key]
-    return new_high
+    return bool(high_events)
 
 
 def alert_key(ev):
@@ -1155,7 +1728,7 @@ def alert_key(ev):
     return "%s|%s" % (ev["type"], ev["path"])
 
 
-def escalate_high(ev, cfg):
+def escalate_high(ev, cfg, notify=True):
     """High-severity actions: URGENT.txt plus optional fallbacks.
 
     The system tray agent owns user notification by default. The classic
@@ -1175,10 +1748,10 @@ def escalate_high(ev, cfg):
         lines.append("  signer: " + ev["signer"])
     append_urgent("\n".join(lines))
     mode = cfg["ai"].get("mode", "recommend")
-    if cfg.get("notify", {}).get("balloon", True):
-        notify_balloon("TripFlare high alert",
-                       "%s (%s) score=%d" % (os.path.basename(ev["path"]),
-                                             ev["type"], ev["score"]))
+    if notify and cfg.get("notify", {}).get("balloon", True):
+        notify_balloon("TripFlare 高危异常",
+                       "%s · 风险分 %d" % (os.path.basename(ev["path"]),
+                                          ev["score"]))
     if mode != "patrol" and cfg.get("notify", {}).get("desktop_bat", False):
         write_desktop_bat()
 
@@ -1202,14 +1775,149 @@ def detect_backend():
     return None
 
 
-def call_ai(cfg, prompt):
-    """Invoke the AI backend once. Returns (text, error)."""
+def probe_ollama(api_base=None, timeout=0.8):
+    """Return list of locally available Ollama model names, or []."""
+    base = (api_base or "http://127.0.0.1:11434").strip().rstrip("/")
+    if not base:
+        return []
+    req = urllib.request.Request(base + "/api/tags", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        return [m["name"] for m in (data.get("models") or [])
+                if isinstance(m, dict) and m.get("name")]
+    except Exception:
+        return []
+
+
+def resolve_ai_provider(cfg):
+    """Resolve active AI provider: 'ollama', 'openai', or 'cli'."""
     ai = cfg.get("ai", {})
+    prov = (ai.get("provider") or "auto").strip().lower()
+    if prov in ("ollama", "openai", "cli"):
+        return prov
+    key = (ai.get("api_key")
+           or os.environ.get("TRIPFLARE_API_KEY")
+           or os.environ.get("OPENAI_API_KEY") or "").strip()
+    if key:
+        return "openai"
+    bp = (ai.get("backend_path") or "auto").strip()
+    if (bp != "auto" and os.path.exists(bp)) or detect_backend():
+        return "cli"
+    if probe_ollama(ai.get("api_base")):
+        return "ollama"
+    return "cli"
+
+
+def describe_ai_backend(cfg):
+    """Human-readable descriptor of the resolved AI backend."""
+    ai = cfg.get("ai", {})
+    prov = resolve_ai_provider(cfg)
+    if prov == "ollama":
+        base = (ai.get("api_base") or "http://127.0.0.1:11434").strip()
+        model = (ai.get("model") or "").strip()
+        if not model:
+            models = probe_ollama(base, timeout=0.5)
+            model = models[0] if models else "auto (none)"
+        return "Ollama (%s @ %s)" % (model, base)
+    if prov == "openai":
+        base = (ai.get("api_base") or "https://api.openai.com/v1").strip()
+        model = (ai.get("model") or "gpt-4o-mini").strip()
+        return "OpenAI API (%s @ %s)" % (model, base)
+    bp = (ai.get("backend_path") or "auto").strip()
+    resolved = detect_backend() if bp == "auto" else bp
+    return "CLI (%s)" % (resolved or "NOT FOUND")
+
+
+def _http_post_json(url, payload, headers=None, timeout=120):
+    """Send JSON POST via urllib.request; return (dict | None, error)."""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    hdrs = {"Content-Type": "application/json",
+            "User-Agent": "TripFlare/%s" % VERSION}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+        return json.loads(raw), None
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        return None, "HTTP %s: %s" % (exc.code, detail or exc.reason)
+    except urllib.error.URLError as exc:
+        return None, "request failed: %s" % exc.reason
+    except (OSError, TimeoutError, ValueError) as exc:
+        return None, "HTTP error: %s" % exc
+
+
+def _call_ai_ollama(ai, prompt):
+    base = (ai.get("api_base") or "http://127.0.0.1:11434").strip().rstrip("/")
+    model = (ai.get("model") or "").strip()
+    if not model:
+        models = probe_ollama(base, timeout=2.0)
+        if not models:
+            return None, ("Ollama unavailable or no models found "
+                          "(run: ollama pull qwen2.5:7b)")
+        model = models[0]
+    timeout = int(ai.get("timeout_seconds", 600))
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }
+    data, err = _http_post_json(base + "/api/chat", payload, timeout=timeout)
+    if err:
+        return None, "Ollama error: %s" % err
+    text = (data.get("message") or {}).get("content", "")
+    if not text:
+        return None, "Ollama returned empty response"
+    return text.strip(), None
+
+
+def _call_ai_openai(ai, prompt):
+    base = (ai.get("api_base") or "https://api.openai.com/v1").strip().rstrip("/")
+    url = base if base.endswith("/chat/completions") else (
+        base + "/chat/completions")
+    key = (ai.get("api_key")
+           or os.environ.get("TRIPFLARE_API_KEY")
+           or os.environ.get("OPENAI_API_KEY") or "").strip()
+    model = (ai.get("model") or "gpt-4o-mini").strip()
+    timeout = int(ai.get("timeout_seconds", 600))
+    headers = {}
+    if key:
+        headers["Authorization"] = "Bearer %s" % key
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+    }
+    data, err = _http_post_json(url, payload, headers=headers, timeout=timeout)
+    if err:
+        return None, "OpenAI API error: %s" % err
+    choices = data.get("choices") or []
+    if not choices:
+        return None, "OpenAI API returned no choices"
+    content = (choices[0].get("message") or {}).get("content", "")
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") for part in content
+            if isinstance(part, dict))
+    if not str(content).strip():
+        return None, "OpenAI API returned empty response"
+    return str(content).strip(), None
+
+
+def _call_ai_cli(ai, prompt):
     backend = ai.get("backend_path") or "auto"
     if backend == "auto":
         backend = detect_backend()
     if not backend:
-        return None, "no AI backend found (set ai.backend_path in config)"
+        return None, ("No AI backend found. Configure Ollama, OpenAI API, "
+                      "or set ai.backend_path.")
     args = [backend] + [a.replace("{prompt}", prompt)
                         for a in ai.get("backend_args", ["-p", "{prompt}"])]
     try:
@@ -1228,6 +1936,17 @@ def call_ai(cfg, prompt):
         return None, "backend launch failed: %s" % exc
 
 
+def call_ai(cfg, prompt):
+    """Invoke configured AI provider (ollama / openai / cli). Returns (text, err)."""
+    ai = cfg.get("ai", {})
+    prov = resolve_ai_provider(cfg)
+    if prov == "ollama":
+        return _call_ai_ollama(ai, prompt)
+    if prov == "openai":
+        return _call_ai_openai(ai, prompt)
+    return _call_ai_cli(ai, prompt)
+
+
 def load_prompt(name):
     try:
         with open(os.path.join(PROMPTS_DIR, name), "r",
@@ -1237,13 +1956,44 @@ def load_prompt(name):
         return "You are a Windows security analyst. Review the alerts below."
 
 
-def build_review_prompt(alerts):
+def _english_lang_override(patrol=False):
+    if patrol:
+        return (
+            "\n\n## Output Language Override\n\n"
+            "Write ALL output (headings, verdicts, evidence, actions, and "
+            "summary) in **English**:\n"
+            "## Alert <id>: <path>\n"
+            "- **Verdict**: benign | suspicious | high\n"
+            "- **Evidence**: ...\n"
+            "- **Recommended action**: ...\n\n"
+            "## Patrol summary\n"
+            "- Overall: <N> benign, <N> suspicious, <N> high.\n"
+            "- Follow-ups: ...\n"
+        )
+    return (
+        "\n\n## Output Language Override\n\n"
+        "Write ALL output (headings, verdicts, evidence, actions, and "
+        "summary) in **English**:\n"
+        "## Alert <id>: <path>\n"
+        "- **Verdict**: benign | suspicious | high\n"
+        "- **Evidence**: ...\n"
+        "- **Recommended action**: ...\n\n"
+        "Overall: <N> benign, <N> suspicious, <N> high.\n"
+    )
+
+
+def build_review_prompt(alerts, cfg=None, lang=None):
+    active_lang = lang or resolve_language(cfg)
     body = json.dumps(alerts, ensure_ascii=False, indent=1)
-    return ("%s\n\n## Alerts to review (JSON)\n\n```json\n%s\n```\n"
-            % (load_prompt("review_prompt.md"), body))
+    base = load_prompt("review_prompt.md")
+    if active_lang == "en":
+        base += _english_lang_override(patrol=False)
+    return "%s\n\n## Alerts to review (JSON)\n\n```json\n%s\n```\n" % (
+        base, body)
 
 
-def build_patrol_prompt(cfg, alerts, state):
+def build_patrol_prompt(cfg, alerts, state, lang=None):
+    active_lang = lang or resolve_language(cfg)
     ai = cfg.get("ai", {})
     quarantine = ai.get("patrol", {}).get("allow_auto_quarantine", False)
     body = json.dumps(alerts, ensure_ascii=False, indent=1)
@@ -1267,12 +2017,16 @@ def build_patrol_prompt(cfg, alerts, state):
         body,
         "```",
     ]
-    return load_prompt("patrol_prompt.md") + "\n".join(context) + "\n"
+    base = load_prompt("patrol_prompt.md")
+    if active_lang == "en":
+        base += _english_lang_override(patrol=True)
+    return base + "\n".join(context) + "\n"
 
 
 HIGH_VERDICT_RE = re.compile(
-    r"(?im)^\s*[-*>\s]*\**\s*verdict\s*\**\s*[:：]\s*\**\s*(high|critical)\b"
-    r"|高危")
+    r"(?im)^\s*[-*>\s]*\**\s*(?:verdict|裁决|判定|风险结论)\s*\**\s*[:：]"
+    r"\s*\**\s*(?:high|critical|高危\b)"
+)
 
 
 def report_has_high(report):
@@ -1318,13 +2072,21 @@ def patrol_tick(cfg, trigger="scheduled", state=None):
     if since == 0:
         since = now - 86400
     alerts = read_alerts(since_epoch=since, levels={"warn", "high"}, cap=10)
-    prompt = build_patrol_prompt(cfg, alerts, st)
+    lang = resolve_language(cfg)
+    prompt = build_patrol_prompt(cfg, alerts, st, lang=lang)
     report, err = call_ai(cfg, prompt)
     if err:
         log("patrol AI call failed: %s" % err)
         return False, "AI call failed: %s" % err
-    header = ("# TripFlare patrol report (%s trigger)\n\n- time: %s\n"
-              "- alerts supplied: %d\n\n" % (trigger, now_iso(), len(alerts)))
+    if lang == "en":
+        header = ("# TripFlare AI Patrol Report (%s trigger)\n\n- time: %s\n"
+                  "- alerts supplied: %d\n\n"
+                  % (trigger, now_iso(), len(alerts)))
+    else:
+        trigger_zh = "高危立即触发" if trigger == "immediate" else "定时例行巡逻"
+        header = ("# TripFlare AI 自动巡逻报告（%s）\n\n- 生成时间: %s\n"
+                  "- 送审告警数: %d\n\n"
+                  % (trigger_zh, now_iso(), len(alerts)))
     path = save_review("patrol", header + report + "\n")
     st["ai"]["calls_today"] = st["ai"].get("calls_today", 0) + 1
     st["ai"]["last_patrol"] = now
@@ -1395,6 +2157,258 @@ def run_round(state, cfg, heavy=False, timings=None):
 
 
 # --------------------------------------------------------------------------
+# Real-time Win32 file watcher (ReadDirectoryChangesW, pure ctypes stdlib)
+# --------------------------------------------------------------------------
+
+def realtime_watch_roots(cfg):
+    """Return [(root_path, max_depth, watch_subtree)] for instant monitoring."""
+    up = os.path.expanduser("~")
+    appdata = os.environ.get("APPDATA", os.path.join(up, "AppData", "Roaming"))
+    local = os.environ.get("LOCALAPPDATA", os.path.join(up, "AppData", "Local"))
+    pdata = os.environ.get("ProgramData", r"C:\ProgramData")
+    temp = os.environ.get("TEMP", os.path.join(local, "Temp"))
+    cands = [
+        (os.path.join(appdata, "Microsoft", "Windows",
+                      "Start Menu", "Programs", "Startup"), 2, True),
+        (os.path.join(pdata, "Microsoft", "Windows",
+                      "Start Menu", "Programs", "StartUp"), 2, True),
+        (os.path.join(up, "Downloads"), 3, True),
+        (os.path.join(up, "Desktop"), 3, True),
+        (temp, 2, True),
+        (up, 1, False),
+    ]
+    out = []
+    seen = set()
+    for raw_root, depth, subtree in cands:
+        r = norm(long_path(raw_root))
+        low = r.lower()
+        if low in seen or not os.path.isdir(r):
+            continue
+        seen.add(low)
+        out.append((r, depth, subtree))
+    return out
+
+
+class RealtimeDirectoryWatcher:
+    """Win32 ReadDirectoryChangesW watcher waking the daemon on file drops."""
+
+    FILE_LIST_DIRECTORY = 0x0001
+    FILE_SHARE_ALL = 0x0007
+    OPEN_EXISTING = 3
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    NOTIFY_FILTER = 0x00000001 | 0x00000008 | 0x00000010  # name|size|write
+
+    def __init__(self, roots, exclusions=None, use_filter=True):
+        self.roots = list(roots)
+        self.exclusions = list(exclusions or [])
+        self.use_filter = bool(use_filter)
+        self._lock = threading.Lock()
+        self._pending = set()
+        self._wakeup = threading.Event()
+        self._stopped = False
+        self._handles = []
+        self._threads = []
+        self._k32 = None
+        self._invalid = None
+
+    def _init_win32(self):
+        k32 = ctypes.windll.kernel32
+        k32.CreateFileW.argtypes = [
+            wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+            wt.DWORD, wt.DWORD, wt.HANDLE,
+        ]
+        k32.CreateFileW.restype = wt.HANDLE
+        k32.ReadDirectoryChangesW.argtypes = [
+            wt.HANDLE, ctypes.c_void_p, wt.DWORD, wt.BOOL, wt.DWORD,
+            ctypes.POINTER(wt.DWORD), ctypes.c_void_p, ctypes.c_void_p,
+        ]
+        k32.ReadDirectoryChangesW.restype = wt.BOOL
+        k32.CancelIoEx.argtypes = [wt.HANDLE, ctypes.c_void_p]
+        k32.CancelIoEx.restype = wt.BOOL
+        k32.CloseHandle.argtypes = [wt.HANDLE]
+        k32.CloseHandle.restype = wt.BOOL
+        self._k32 = k32
+        self._invalid = ctypes.c_void_p(-1).value
+
+    def update_settings(self, exclusions, use_filter):
+        with self._lock:
+            self.exclusions = list(exclusions or [])
+            self.use_filter = bool(use_filter)
+
+    def start(self):
+        if os.name != "nt":
+            return
+        self._init_win32()
+        for root, max_depth, subtree in self.roots:
+            if not os.path.isdir(root):
+                continue
+            h = self._k32.CreateFileW(
+                root, self.FILE_LIST_DIRECTORY, self.FILE_SHARE_ALL,
+                None, self.OPEN_EXISTING, self.FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+            if not h or h == self._invalid:
+                log("realtime watch open failed for %s" % root)
+                continue
+            self._handles.append(h)
+            t = threading.Thread(
+                target=self._watch_loop,
+                args=(h, root, max_depth, subtree),
+                daemon=True,
+                name="tripflare-watch",
+            )
+            self._threads.append(t)
+            t.start()
+
+    def _watch_loop(self, handle, root, max_depth, subtree):
+        buf = ctypes.create_string_buffer(65536)
+        nbytes = wt.DWORD(0)
+        try:
+            while not self._stopped:
+                ok = self._k32.ReadDirectoryChangesW(
+                    handle, buf, len(buf), bool(subtree),
+                    self.NOTIFY_FILTER, ctypes.byref(nbytes), None, None,
+                )
+                if not ok or self._stopped:
+                    break
+                total = nbytes.value
+                if total == 0:
+                    continue
+                offset = 0
+                raw_buf = buf.raw
+                added = False
+                while offset + 12 <= total:
+                    next_off, action, name_len = struct.unpack_from(
+                        "<III", raw_buf, offset)
+                    end = min(total, offset + 12 + name_len)
+                    rel = raw_buf[offset + 12:end].decode(
+                        "utf-16-le", "replace")
+                    if action in (1, 3, 5) and rel:
+                        if self._consider_rel(root, rel, max_depth):
+                            added = True
+                    if next_off == 0:
+                        break
+                    offset += next_off
+                if added:
+                    self._wakeup.set()
+        except Exception as exc:
+            if not self._stopped:
+                log("realtime watcher loop error (%s): %s" % (root, exc))
+        finally:
+            try:
+                self._k32.CloseHandle(handle)
+            except Exception:
+                pass
+
+    def _consider_rel(self, root, rel, max_depth):
+        if rel.count(os.sep) > max_depth:
+            return False
+        ext = os.path.splitext(rel)[1].lower()
+        if ext not in WATCH_EXTS:
+            return False
+        full = norm(long_path(os.path.join(root, rel)))
+        low = full.lower()
+        with self._lock:
+            exclusions = self.exclusions
+            use_filter = self.use_filter
+        if any(low == e or low.startswith(e + os.sep) for e in exclusions):
+            return False
+        if (use_filter and is_temp_direct_atomic_noise(full)
+                and not is_hidden_file(full)):
+            return False
+        with self._lock:
+            self._pending.add(full)
+        return True
+
+    def wait(self, timeout):
+        return self._wakeup.wait(timeout)
+
+    def has_pending(self):
+        with self._lock:
+            return bool(self._pending)
+
+    def pop_pending(self):
+        with self._lock:
+            items = sorted(self._pending)
+            self._pending.clear()
+            self._wakeup.clear()
+            return items
+
+    def stop(self):
+        self._stopped = True
+        self._wakeup.set()
+        if self._k32 is not None:
+            for h in list(self._handles):
+                try:
+                    self._k32.CancelIoEx(h, None)
+                except Exception:
+                    pass
+        for t in list(self._threads):
+            t.join(timeout=1.0)
+        self._handles.clear()
+        self._threads.clear()
+
+
+def scan_realtime_paths(paths, state, cfg):
+    """Score and alert on a batch of paths reported by ReadDirectoryChangesW."""
+    if not paths:
+        return []
+    use_filter = bool(cfg.get("system_noise_filter", True))
+    st_dirs = startup_dirs()
+    exclusions = get_exclusions(cfg)
+    old_files = state.setdefault("files", {})
+    events = []
+    for raw_path in paths:
+        path = norm(long_path(raw_path))
+        low = path.lower()
+        if any(low == e or low.startswith(e + os.sep) for e in exclusions):
+            continue
+        if is_allowed_path(path, cfg) or path in OWN_FILES():
+            continue
+        if not os.path.isfile(path):
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        size, mtime = st.st_size, st.st_mtime
+        prev = old_files.get(path)
+        if prev is None:
+            kind = "file_new"
+        elif list(prev[:2]) != [size, mtime]:
+            kind = "file_modified"
+        else:
+            continue
+        persistence = norm_lower(os.path.dirname(path)) in st_dirs
+        if (use_filter and is_temp_direct_atomic_noise(path)
+                and not persistence and not is_hidden_file(path)):
+            continue
+        old_files[path] = [size, mtime, None, None, None]
+        ext = os.path.splitext(path)[1].lower()
+        events.append({
+            "type": kind,
+            "path": path,
+            "persistence": persistence,
+            "needs_sig": ext in SIGN_EXTS,
+            "sha1": sha1_of(path, int(cfg.get("sha1_max_bytes", 52428800))),
+            "hidden": is_hidden_file(path),
+            "extra": {"size": size},
+        })
+    if not events:
+        return []
+    scan_registry_light(state, cfg, events)
+    scan_processes(state, cfg, events)
+    finalize_scores(events, cfg)
+    new_high = handle_events(events, state, cfg)
+    if events:
+        log("realtime tripwire processed %d event(s)" % len(events))
+    if new_high and cfg.get("ai", {}).get("mode") == "patrol":
+        threading.Thread(target=_immediate_patrol_async, args=(cfg,),
+                         daemon=True, name="tripflare-patrol").start()
+    return events
+
+
+# --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
 
@@ -1437,7 +2451,7 @@ def cmd_init(cfg):
 
 
 def cmd_daemon(cfg):
-    """Scan forever every interval_seconds (heavy items every N rounds)."""
+    """Scan forever with real-time file watch + periodic light/heavy rounds."""
     state = load_state()
     if state is None:
         log("no baseline found, running implicit --init")
@@ -1445,12 +2459,42 @@ def cmd_daemon(cfg):
         state = load_state()
     interval = max(10, int(cfg.get("interval_seconds", 60)))
     heavy_every = max(1, int(cfg.get("heavy_interval_rounds", 5)))
-    log("daemon started (interval=%ds, heavy every %d rounds, ai.mode=%s)"
-        % (interval, heavy_every, cfg["ai"].get("mode")))
-    print("TripFlare daemon running. interval=%ds, data=%s" % (interval, DATA_DIR))
+    watcher = None
+    if cfg.get("realtime_watch", True) and os.name == "nt":
+        watcher = RealtimeDirectoryWatcher(
+            realtime_watch_roots(cfg),
+            exclusions=get_exclusions(cfg),
+            use_filter=bool(cfg.get("system_noise_filter", True)),
+        )
+        watcher.start()
+    log("daemon started (interval=%ds, heavy every %d rounds, realtime=%s, "
+        "ai.mode=%s)" % (interval, heavy_every, bool(watcher),
+                         cfg["ai"].get("mode")))
+    print("TripFlare daemon running. interval=%ds, realtime=%s, data=%s"
+          % (interval, bool(watcher), DATA_DIR))
     print("Press Ctrl+C to stop.")
     try:
         while True:
+            cfg = load_config()
+            interval = max(10, int(cfg.get("interval_seconds", 60)))
+            heavy_every = max(1, int(cfg.get("heavy_interval_rounds", 5)))
+            want_rt = bool(cfg.get("realtime_watch", True)) and os.name == "nt"
+            if want_rt and watcher is None:
+                watcher = RealtimeDirectoryWatcher(
+                    realtime_watch_roots(cfg),
+                    exclusions=get_exclusions(cfg),
+                    use_filter=bool(cfg.get("system_noise_filter", True)),
+                )
+                watcher.start()
+            elif not want_rt and watcher is not None:
+                watcher.stop()
+                watcher = None
+            elif watcher is not None:
+                watcher.update_settings(
+                    get_exclusions(cfg),
+                    bool(cfg.get("system_noise_filter", True)),
+                )
+
             state = load_state() or state
             heavy = (state.get("rounds", 0) % heavy_every == 0)
             try:
@@ -1458,11 +2502,35 @@ def cmd_daemon(cfg):
                 save_state(state)
             except Exception:
                 log("round failed:\n%s" % traceback.format_exc())
-            time.sleep(interval)
+
+            next_periodic = time.monotonic() + interval
+            while True:
+                rem = next_periodic - time.monotonic()
+                if rem <= 0:
+                    break
+                if watcher is None:
+                    time.sleep(min(rem, 5.0))
+                    continue
+                watcher.wait(min(rem, 5.0))
+                if watcher.has_pending():
+                    time.sleep(0.6)  # coalesce bursts from installers/archives
+                    pending_paths = watcher.pop_pending()
+                    if pending_paths:
+                        try:
+                            cfg = load_config()
+                            state = load_state() or state
+                            scan_realtime_paths(pending_paths, state, cfg)
+                            save_state(state)
+                        except Exception:
+                            log("realtime scan failed:\n%s"
+                                % traceback.format_exc())
     except KeyboardInterrupt:
         log("daemon stopped by user")
         print("\nTripFlare daemon stopped.")
         return 0
+    finally:
+        if watcher is not None:
+            watcher.stop()
 
 
 def cmd_digest(cfg):
@@ -1507,13 +2575,19 @@ def cmd_ai_review(cfg, max_alerts=None):
         print("No pending alerts to review (%d warn/high alert(s) in "
               "history, all reviewed)." % total)
         return 0
-    print("Sending %d alert(s) to the AI backend...\n" % len(alerts))
-    report, err = call_ai(cfg, build_review_prompt(alerts))
+    print("Sending %d alert(s) to AI (%s)...\n"
+          % (len(alerts), describe_ai_backend(cfg)))
+    lang = resolve_language(cfg)
+    report, err = call_ai(cfg, build_review_prompt(alerts, cfg=cfg, lang=lang))
     if err:
         print("AI review failed: %s" % err)
         return 1
-    header = ("# TripFlare AI review\n\n- time: %s\n- alerts supplied: %d\n\n"
-              % (now_iso(), len(alerts)))
+    if lang == "en":
+        header = ("# TripFlare AI Review Report\n\n- time: %s\n"
+                  "- alerts supplied: %d\n\n" % (now_iso(), len(alerts)))
+    else:
+        header = ("# TripFlare AI 研判报告\n\n- 生成时间: %s\n- 送审告警数: %d\n\n"
+                  % (now_iso(), len(alerts)))
     path = save_review("review", header + report + "\n")
     mark_alerts_read([alert_id(a) for a in alerts])
     state["ai"]["last_review"] = time.time()
@@ -1558,7 +2632,7 @@ def cmd_status(cfg):
     print("  data dir   : %s" % DATA_DIR)
     print("  config     : %s" % (cfg.get("_config_path") or "(built-in defaults)"))
     print("  ai.mode    : %s" % cfg["ai"].get("mode"))
-    print("  ai.backend : %s" % (cfg["ai"].get("backend_path") or "auto"))
+    print("  ai.backend : %s" % describe_ai_backend(cfg))
     if state is None:
         print("  baseline   : MISSING - run tripflare.py --init")
         return 1
@@ -1577,8 +2651,155 @@ def cmd_status(cfg):
         counts[a.get("level", "info")] = counts.get(a.get("level", "info"), 0) + 1
     print("  alerts     : high=%d warn=%d info=%d (total in alerts.jsonl)"
           % (counts["high"], counts["warn"], counts["info"]))
-    backend = detect_backend()
-    print("  ai backend : %s" % (backend or "NOT FOUND"))
+    print("  ai resolved: %s" % describe_ai_backend(cfg))
+    return 0
+
+
+def is_historical_noise_alert(alert):
+    """True when an alert matches known OS/background noise signatures."""
+    tp = alert.get("type", "")
+    path = alert.get("path", "")
+    signer = alert.get("signer") or ""
+    sig_status = alert.get("sig_status")
+    extra = alert.get("extra") or {}
+    if tp in ("file_new", "file_modified"):
+        if is_in_temp(path):
+            base = os.path.basename(path)
+            if PS_POLICY_TEST_RE.match(base) or ATOMIC_TMP_JS_RE.match(base):
+                return True
+            if ((sig_status == "Valid" or sig_status is None)
+                    and is_microsoft_signer(signer)
+                    and not has_random_stem(path)):
+                if is_in_temp_guid_dir(path):
+                    return True
+                if (is_in_temp_mei_dir(path)
+                        and base.lower().startswith(MASQ_PREFIXES)):
+                    return True
+                if (EDGE_TEMP_INSTALLER_RE.match(base)
+                        or base.lower().startswith(TEMP_TRANSIENT_MS_PREFIXES)):
+                    return True
+            if (sig_status == "Error" and not signer
+                    and is_in_temp_guid_dir(path)
+                    and base.lower() in KNOWN_DISM_FILES):
+                return True
+        return False
+    if tp in ("service_new", "service_changed"):
+        svc = _short_svc_name(
+            path[len("service:"):] if path.startswith("service:") else path)
+        image = extra.get("image", "")
+        m_user = PER_USER_SVC_RE.match(svc)
+        if m_user and m_user.group(1).upper() in KNOWN_PER_USER_SERVICES:
+            if not image or _is_system32_per_user_image(image):
+                return True
+        if (svc.upper().startswith(BROWSER_UPDATER_SVCS)
+                and "program files" in image.lower()
+                and not SHELL_META_RE.search(image)):
+            return True
+        return False
+    if tp == "task_new":
+        task = extra.get("task") or (
+            path[len("schtasks:"):] if path.startswith("schtasks:") else path)
+        low = task.lower()
+        return (low in SELF_TASK_NAMES
+                or low.startswith(NOISY_SYSTEM_TASK_PREFIXES))
+    if tp == "registry_new":
+        name = extra.get("value") or os.path.basename(path)
+        data = extra.get("data", "")
+        if ("\\runonce\\" in path.lower()
+                and re.fullmatch(r"msedge_cleanup_\{[0-9a-f-]+\}",
+                                 name, re.IGNORECASE)):
+            if not data or ("microsoft\\edge" in data.lower()
+                            and not SHELL_META_RE.search(data)):
+                return True
+    return False
+
+
+def _is_urgent_block_noise(block):
+    lines = block.splitlines()
+    if len(lines) < 2:
+        return False
+    m = re.match(r"^\[([^\]]+)\]\s+(.+)$", lines[1].strip())
+    if not m:
+        return False
+    tp, path = m.group(1).strip(), m.group(2).strip()
+    signer = ""
+    for line in lines[2:]:
+        s_line = line.strip()
+        if s_line.startswith("signer:"):
+            signer = s_line[len("signer:"):].strip()
+            break
+    sig_status = "Valid" if signer else None
+    if not signer and "(Error)" in block:
+        sig_status = "Error"
+    synthetic = {
+        "type": tp,
+        "path": path,
+        "signer": signer,
+        "sig_status": sig_status,
+    }
+    return is_historical_noise_alert(synthetic)
+
+
+def prune_historical_noise():
+    """Back up and remove historical OS/background noise from alerts & URGENT.
+
+    Returns (removed_alerts, kept_alerts, removed_urgent_blocks).
+    """
+    removed_alerts = kept_alerts = removed_urgent = 0
+    if os.path.exists(ALERTS_PATH):
+        bak = ALERTS_PATH + ".bak"
+        if not os.path.exists(bak):
+            shutil.copy2(ALERTS_PATH, bak)
+        kept_lines = []
+        with open(ALERTS_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    alert = json.loads(raw)
+                except ValueError:
+                    kept_lines.append(raw)
+                    continue
+                if is_historical_noise_alert(alert):
+                    removed_alerts += 1
+                else:
+                    kept_lines.append(json.dumps(alert, ensure_ascii=False))
+                    kept_alerts += 1
+        tmp = ALERTS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            if kept_lines:
+                fh.write("\n".join(kept_lines) + "\n")
+        os.replace(tmp, ALERTS_PATH)
+    if os.path.exists(URGENT_PATH):
+        bak_u = URGENT_PATH + ".bak"
+        if not os.path.exists(bak_u):
+            shutil.copy2(URGENT_PATH, bak_u)
+        with open(URGENT_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            raw_urgent = fh.read()
+        blocks = [b for b in raw_urgent.split("\n\n") if b.strip()]
+        kept_blocks = []
+        for b in blocks:
+            if _is_urgent_block_noise(b):
+                removed_urgent += 1
+            else:
+                kept_blocks.append(b.rstrip())
+        tmp_u = URGENT_PATH + ".tmp"
+        with open(tmp_u, "w", encoding="utf-8") as fh:
+            if kept_blocks:
+                fh.write("\n\n".join(kept_blocks) + "\n\n")
+        os.replace(tmp_u, URGENT_PATH)
+    log("prune-noise: removed_alerts=%d kept_alerts=%d removed_urgent=%d"
+        % (removed_alerts, kept_alerts, removed_urgent))
+    return removed_alerts, kept_alerts, removed_urgent
+
+
+def cmd_prune_noise():
+    removed, kept, removed_u = prune_historical_noise()
+    print("Pruned historical OS/background noise:")
+    print("  alerts removed : %d" % removed)
+    print("  alerts kept    : %d" % kept)
+    print("  URGENT removed : %d" % removed_u)
     return 0
 
 
@@ -1605,6 +2826,7 @@ Commands:
   allow <x>     allowlist a path or signer substring
   status        show status
   patrol-tick   scheduled patrol entry point (patrol mode only)
+  prune-noise   clean historical OS/background noise from alerts and URGENT.txt
   --bench       timed heavy round
 """
 
@@ -1636,6 +2858,8 @@ def main(argv):
         return cmd_status(cfg)
     if args and args[0] == "patrol-tick":
         return cmd_patrol_tick(cfg)
+    if args and args[0] == "prune-noise":
+        return cmd_prune_noise()
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0

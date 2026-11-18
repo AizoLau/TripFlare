@@ -26,13 +26,42 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import tripflare as core  # noqa: E402  (paths + python resolvers reused)
 
+SCRIPT_DIR = core.SCRIPT_DIR
 DATA_DIR = core.DATA_DIR
 TRAY_LOG = os.path.join(DATA_DIR, "tray.log")
 ALERTS_PATH = core.ALERTS_PATH
-ICON_PATH = os.path.join(SCRIPT_DIR, "tripflare.ico")
+ICON_PATH = core.resolve_resource_path("tripflare.ico")
 UI_SCRIPT = os.path.join(SCRIPT_DIR, "tripflare_ui.pyw")
 CORE_SCRIPT = os.path.join(SCRIPT_DIR, "tripflare.py")
 CREATE_NO_WINDOW = 0x08000000
+
+TYPE_I18N = {
+    "zh": {
+        "file_new": "新增文件",
+        "file_modified": "文件修改",
+        "registry_new": "注册表新增",
+        "registry_changed": "注册表修改",
+        "registry_modified": "注册表修改",
+        "process_new": "新进程",
+        "task_new": "计划任务新增",
+        "service_new": "服务新增",
+        "service_changed": "服务修改",
+        "ifeo_debugger": "IFEO 调试器",
+    },
+    "en": {
+        "file_new": "New File",
+        "file_modified": "Modified File",
+        "registry_new": "New Registry",
+        "registry_changed": "Registry Modified",
+        "registry_modified": "Registry Modified",
+        "process_new": "New Process",
+        "task_new": "New Scheduled Task",
+        "service_new": "New Service",
+        "service_changed": "Service Modified",
+        "ifeo_debugger": "IFEO Debugger",
+    },
+}
+TYPE_ZH = TYPE_I18N["zh"]
 
 # --------------------------------------------------------------------------
 # Logging
@@ -58,11 +87,12 @@ def log(msg):
 # --------------------------------------------------------------------------
 
 def open_console(alerts=False, reports=False):
-    args = [core.windowless_python(), UI_SCRIPT]
+    flags = []
     if reports:
-        args.append("--reports")
+        flags.append("--reports")
     elif alerts:
-        args.append("--alerts")
+        flags.append("--alerts")
+    args = core.ui_cmd(*flags)
     try:
         subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)
         log("action: open console (alerts=%s reports=%s)" % (alerts, reports))
@@ -71,7 +101,7 @@ def open_console(alerts=False, reports=False):
 
 
 def daemon_task(action):
-    """Start or stop the daemon through its scheduled task."""
+    """Start or stop the daemon through its scheduled task or sibling exe."""
     try:
         proc = subprocess.run(["schtasks", "/%s" % action, "/tn",
                                "TripFlareDaemon"],
@@ -80,6 +110,11 @@ def daemon_task(action):
         out = proc.stdout.decode("mbcs", "replace").strip()
         log("action: schtasks /%s TripFlareDaemon rc=%d %s"
             % (action, proc.returncode, out[:120]))
+        if proc.returncode != 0 and action == "run" and core.FROZEN:
+            exe = os.path.join(SCRIPT_DIR, "TripFlareDaemon.exe")
+            if os.path.exists(exe):
+                subprocess.Popen([exe], creationflags=CREATE_NO_WINDOW)
+                log("action: started %s directly" % exe)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log("action: schtasks /%s failed: %s" % (action, exc))
 
@@ -93,12 +128,19 @@ def open_data_dir():
 
 
 def daemon_running():
-    """True when a python process command line contains tripflare.py."""
-    script = ("Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" "
-              "| Where-Object { $_.CommandLine -like '*tripflare.py*' "
-              "-and $_.CommandLine -notlike '*--bench*' "
-              "-and $_.CommandLine -notlike '*patrol-tick*' } "
-              "| Measure-Object | Select-Object -ExpandProperty Count")
+    """True when TripFlare daemon (python or frozen exe) is running."""
+    script = (
+        "Get-CimInstance Win32_Process | Where-Object { "
+        "($_.Name -like 'python*' -and $_.CommandLine -like '*tripflare.py*' "
+        "-and $_.CommandLine -notlike '*--bench*' "
+        "-and $_.CommandLine -notlike '*--init*' "
+        "-and $_.CommandLine -notlike '*patrol-tick*') -or "
+        "($_.Name -ieq 'TripFlareDaemon.exe' "
+        "-and $_.CommandLine -notlike '*--bench*' "
+        "-and $_.CommandLine -notlike '*--init*' "
+        "-and $_.CommandLine -notlike '*patrol-tick*') "
+        "} | Measure-Object | Select-Object -ExpandProperty Count"
+    )
     try:
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
@@ -199,8 +241,21 @@ MFT_STRING, MFT_SEPARATOR = 0x0000, 0x0800
 MFS_GRAYED = 0x0003
 MF_BYPOSITION = 0x0400
 
-def menu_items(daemon_on, ai_on):
+def menu_items(daemon_on, ai_on, lang="zh"):
     """Menu layout; None = separator. State-aware labels/enablement."""
+    if lang == "en":
+        return [
+            (CMD_CONSOLE, "Open Console", True),
+            (CMD_REVIEW,
+             "AI Triage (Running...)" if ai_on else "Run AI Triage Now",
+             not ai_on),
+            None,
+            (CMD_START, "Start Monitor", not daemon_on),
+            (CMD_STOP, "Stop Monitor", daemon_on),
+            None,
+            (CMD_DATADIR, "Open Data Folder", True),
+            (CMD_QUIT, "Quit Tray", True),
+        ]
     return [
         (CMD_CONSOLE, "打开控制台", True),
         (CMD_REVIEW,
@@ -214,10 +269,10 @@ def menu_items(daemon_on, ai_on):
     ]
 
 
-def build_menu(daemon_on=True, ai_on=False):
+def build_menu(daemon_on=True, ai_on=False, lang="zh"):
     """Create the tray popup menu via InsertMenuItemW/MENUITEMINFOW."""
     menu = user32.CreatePopupMenu()
-    for pos, item in enumerate(menu_items(daemon_on, ai_on)):
+    for pos, item in enumerate(menu_items(daemon_on, ai_on, lang=lang)):
         mii = MENUITEMINFOW()
         mii.cbSize = ctypes.sizeof(MENUITEMINFOW)
         if item is None:
@@ -374,7 +429,7 @@ class TrayApp:
         except OSError:
             self.alerts_offset = 0
         log("alerts tail offset=%d" % self.alerts_offset)
-        user32.SetTimer(self.hwnd, TIMER_ALERTS, 10000, None)
+        user32.SetTimer(self.hwnd, TIMER_ALERTS, 1500, None)
         user32.SetTimer(self.hwnd, TIMER_TOOLTIP, 30000, None)
         self._refresh_tooltip()
 
@@ -394,10 +449,18 @@ class TrayApp:
         self.nid = nid
         log("notify icon added: %s" % bool(ok))
 
+    def _tray_lang(self):
+        return core.resolve_language(core.load_config())
+
     def _refresh_tooltip(self):
         self.daemon_state = daemon_running()
-        tip = ("TripFlare - 守护运行中" if self.daemon_state
-               else "TripFlare - 守护已停止")
+        lang = self._tray_lang()
+        if lang == "en":
+            tip = ("TripFlare - Monitor Running" if self.daemon_state
+                   else "TripFlare - Monitor Stopped")
+        else:
+            tip = ("TripFlare - 守护运行中" if self.daemon_state
+                   else "TripFlare - 守护已停止")
         self.nid.uFlags = NIF_TIP
         self.nid.szTip = tip
         shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self.nid))
@@ -425,6 +488,7 @@ class TrayApp:
         except OSError as exc:
             log("alerts read failed: %s" % exc)
             return
+        highs = []
         for line in chunk.splitlines():
             line = line.strip()
             if not line:
@@ -434,13 +498,38 @@ class TrayApp:
             except ValueError:
                 continue
             if alert.get("level") == "high":
-                self._balloon(alert)
+                highs.append(alert)
+        if len(highs) == 1:
+            self._balloon(highs[0])
+        elif len(highs) > 1:
+            top = max(highs, key=lambda a: a.get("score") or 0)
+            name = (os.path.basename(top.get("path", "?"))
+                    or top.get("path", "?"))
+            lang = self._tray_lang()
+            if lang == "en":
+                body = "%s and %d more high alerts\nTop score %s · Click to inspect" % (
+                    name, len(highs) - 1, top.get("score", "?"))
+                self._show_text_balloon(
+                    "TripFlare High Alert (%d)" % len(highs), body, "alert")
+            else:
+                body = "%s 等 %d 项高危变更\n最高风险分 %s · 点击查看告警详情" % (
+                    name, len(highs), top.get("score", "?"))
+                self._show_text_balloon(
+                    "TripFlare 高危异常 (%d 条)" % len(highs), body, "alert")
 
     def _balloon(self, alert):
         path = alert.get("path", "?")
-        body = "%s\n评分 %s · %s" % (
-            path, alert.get("score", "?"), alert.get("type", ""))
-        self._show_text_balloon("TripFlare 高危异常", body, "alert")
+        tp = alert.get("type", "")
+        lang = self._tray_lang()
+        tp_label = TYPE_I18N.get(lang, TYPE_ZH).get(tp, tp)
+        if lang == "en":
+            body = "%s\nScore %s · %s" % (
+                path, alert.get("score", "?"), tp_label)
+            self._show_text_balloon("TripFlare High Alert", body, "alert")
+        else:
+            body = "%s\n风险分 %s · %s" % (
+                path, alert.get("score", "?"), tp_label)
+            self._show_text_balloon("TripFlare 高危异常", body, "alert")
 
     def _show_text_balloon(self, title, body, kind):
         """Show a NIF_INFO balloon (UI thread only) and remember its kind."""
@@ -470,13 +559,19 @@ class TrayApp:
             return
         self.ai_running = True
         log("action: ai-review started")
-        self._post_balloon("TripFlare", "AI 研判进行中…", "progress")
+        lang = self._tray_lang()
+        self._post_balloon(
+            "TripFlare",
+            "AI triage in progress..." if lang == "en" else "AI 研判进行中…",
+            "progress",
+        )
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
     def _ai_worker(self):
+        lang = self._tray_lang()
         try:
             proc = subprocess.run(
-                [core.console_python(), CORE_SCRIPT, "ai-review"],
+                core.daemon_cmd("ai-review"),
                 capture_output=True, timeout=900,
                 creationflags=CREATE_NO_WINDOW)
             out = (proc.stdout + proc.stderr).decode("utf-8",
@@ -485,16 +580,25 @@ class TrayApp:
             log("action: ai-review finished rc=%d: %s"
                 % (proc.returncode, last[:200]))
             if proc.returncode != 0:
-                self._post_balloon("AI 研判失败", last[:200], "error")
+                self._post_balloon(
+                    "AI Triage Failed" if lang == "en" else "AI 研判失败",
+                    last[:200], "error")
             elif "No pending alerts" in out:
-                self._post_balloon("TripFlare AI 研判",
-                                   "没有未研判的告警", "info")
+                self._post_balloon(
+                    "TripFlare AI Triage" if lang == "en" else "TripFlare AI 研判",
+                    "No pending unread alerts" if lang == "en" else "没有未研判的告警",
+                    "info")
             else:
-                self._post_balloon("TripFlare",
-                                   "研判完成，点击查看报告", "review_done")
+                self._post_balloon(
+                    "TripFlare",
+                    "Triage complete, click to view report"
+                    if lang == "en" else "研判完成，点击查看报告",
+                    "review_done")
         except (OSError, subprocess.TimeoutExpired) as exc:
             log("action: ai-review failed: %s" % exc)
-            self._post_balloon("AI 研判失败", str(exc)[:200], "error")
+            self._post_balloon(
+                "AI Triage Failed" if lang == "en" else "AI 研判失败",
+                str(exc)[:200], "error")
         finally:
             self.ai_running = False
 
@@ -503,7 +607,8 @@ class TrayApp:
     def _show_menu(self):
         # Rebuild each time so enablement mirrors the live daemon state.
         self.daemon_state = daemon_running()
-        menu = build_menu(self.daemon_state, self.ai_running)
+        menu = build_menu(self.daemon_state, self.ai_running,
+                          lang=self._tray_lang())
         pt = POINT()
         user32.GetCursorPos(ctypes.byref(pt))
         user32.SetForegroundWindow(self.hwnd)

@@ -1,201 +1,222 @@
+<div align="center">
+
 # TripFlare
 
-Lightweight Windows anomaly monitor (tripwire) with three-tier AI review
-and a tkinter console UI. Single-folder portable layout, standard library
-only, zero tokens by default.
+**Lightweight Windows Perimeter Tripwire & BYOK AI Forensic Console**
 
-[中文说明见文末](#中文说明)
+[![CI](https://github.com/AizoLau/TripFlare/actions/workflows/ci.yml/badge.svg)](https://github.com/AizoLau/TripFlare/actions/workflows/ci.yml)
+[![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows&logoColor=white)](#quickstart)
+[![Python](https://img.shields.io/badge/Python-3.8%2B%20Stdlib%20Only-3776AB?logo=python&logoColor=white)](#quickstart)
+[![Dependencies](https://img.shields.io/badge/Dependencies-Zero-22c55e)](#why-tripflare)
+[![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b.svg)](LICENSE)
 
-## What it does
+**English** · [中文说明](#-中文说明)
 
-TripFlare snapshots the places malware actually touches first — drop zones
-(Downloads / Temp / Desktop / AppData / Startup folders), autostart registry
-keys (`Run`, `RunOnce`, Winlogon, `StartupApproved`, IFEO debuggers,
-services), scheduled tasks, and processes launched from risky locations —
-then scores every change with local heuristics:
+<br/>
 
-unsigned `+3` · unknown signer `+2` · random name `+3` · runtime-DLL
-masquerade `+4` · risky location `+2` · hidden `+1` · persistence `+3`
+<img src="assets/demo.svg" alt="TripFlare Real-Time Detection and AI Triage Workflow" width="880"/>
 
-`score >= 7` = **high**: appends `URGENT.txt` and notifies you through the
-**system tray agent** (persistent icon, balloon, right-click menu). The old
-desktop bat launcher is deprecated and disabled by default
-(`notify.desktop_bat`). Full rule table and threat model:
-[docs/DESIGN.md](docs/DESIGN.md).
+</div>
 
-## Layout (portable single folder)
+---
 
+## Why TripFlare?
+
+Modern Windows compromises rarely start with known malware binaries caught by static hashes. They start with:
+- A masqueraded LOLBin (e.g., `CertUtil.exe` or `mshta.exe` renamed to `Invoice_2026.exe` in `Downloads`)
+- A quiet persistence entry added to `HKCU\...\Run`, Startup folders, Scheduled Tasks, Services, or WMI Event Subscriptions
+- An unsigned script or dropper planted into `%TEMP%`, `AppData`, or browser extension directories
+
+Traditional antivirus engines either miss living-off-the-land changes or consume heavy background CPU/RAM. Enterprise EDRs require signed kernel drivers, cloud telemetry lock-in, and recurring SaaS seats.
+
+**TripFlare** takes a transparent **tripwire baseline + instant anomaly scoring + BYOK AI triage** approach:
+1. **Zero third-party dependencies:** 100% pure Python 3.8+ standard library (`ctypes`, `winreg`, `tkinter`, `urllib.request`) or single-folder portable `.exe` builds. Zero `pip install`, zero kernel drivers, zero inbound listening sockets.
+2. **Sub-second real-time catch:** Hooks `Win32 ReadDirectoryChangesW` across Startup, Downloads, Desktop, `%TEMP%`, and `%USERPROFILE%` (~0.0% idle CPU) paired with deterministic 60s persistence & integrity diffs (`SHA-256`, Authenticode trust checks, PE `OriginalFilename` vs disk filename).
+3. **Bring Your Own AI (Local or Cloud):** Connect to a local **Ollama** model (`100% offline/private`), **any OpenAI-compatible API** (OpenAI, DeepSeek, Groq, OpenRouter, LM Studio, vLLM), or a local CLI coding/security agent — right from the Console UI.
+4. **Actionable 1-Click Containment:** Quarantine suspect binaries, remove malicious `Run` keys, disable tasks, or trust benign developer tools into your local allowlist.
+
+---
+
+## How TripFlare Compares
+
+| Capability | **TripFlare** | Traditional AV | Sysinternals Autoruns | Enterprise EDR |
+| :--- | :--- | :--- | :--- | :--- |
+| **Kernel Driver Needed** | No (Pure User-Mode) | Yes | No | Yes |
+| **Runtime Dependencies** | Zero (`stdlib` / Portable EXE) | Heavy proprietary service | Standalone EXE | Heavy agent + cloud backend |
+| **Real-Time Drop Detection** | Yes (`ReadDirectoryChangesW`) | Yes | No (Manual snapshot only) | Yes |
+| **Renamed LOLBin Detection** | Yes (PE `OriginalFilename` vs disk name) | Partial | Partial | Yes |
+| **AI Forensic Verdict** | **Local Ollama / OpenAI API / CLI** | Vendor black-box | None | Vendor cloud SaaS |
+| **Console + System Tray** | Built-in (`EN / 中文` toggle) | Built-in | Read-only inspector | Web portal |
+| **Telemetry Privacy** | 100% local state (optional BYOK AI) | Vendor telemetry | 100% local | Full cloud upload |
+
+> [!NOTE]
+> **Positioning:** TripFlare is an **endpoint persistence tripwire and forensic companion**, not a kernel antivirus replacement. Keep Windows Defender enabled alongside TripFlare. See [Detection Matrix & Blind Spots](#detection-matrix--blind-spots).
+
+---
+
+## What's New in v0.2.0
+
+- **Real-Time Perimeter Watch:** Multi-threaded `ctypes ReadDirectoryChangesW` watcher (`0.6s` coalesced debounce, `1500ms` tray tail alert) triggers instant binary scoring before persistence completes.
+- **Universal AI Engine (Zero `pip`):** `urllib.request` client supporting `auto` resolution (`OpenAI API key -> local CLI -> running Ollama`), configurable directly in the **Config** tab.
+- **Bilingual UI & AI Reports (`EN / 中文`):** Automatic OS locale detection via Win32 `GetUserDefaultUILanguage()`, live header `EN / 中文` switcher, and language-aligned AI verdicts.
+- **Portable Windows Releases:** Automated GitHub Actions workflow publishing self-contained `TripFlare.exe`, `TripFlareDaemon.exe`, and `TripFlareTray.exe` builds with SHA-256 checksums.
+
+---
+
+## Quickstart
+
+### Option A: Portable Windows `.exe` (No Python Required)
+1. Download the latest `TripFlare-v*-win64-portable.zip` from [GitHub Releases](https://github.com/AizoLau/TripFlare/releases).
+2. Extract to any folder (e.g., `D:\Tools\TripFlare`).
+3. Double-click **`TripFlare.exe`**, then click **Init Baseline** / **初始化基线** -> **Start Guard** / **启动守护**.
+
+### Option B: Run from Source (Python 3.8+, Zero `pip install`)
+```powershell
+git clone https://github.com/AizoLau/TripFlare.git
+cd TripFlare
+
+# 1. Build your initial clean perimeter baseline
+python tripflare.py --init
+
+# 2. Launch the TripFlare Console
+TripFlare.bat
 ```
-TripFlare\
-  TripFlare控制台.bat   # double-click: opens the GUI console (pythonw)
-  tripflare.py          # daemon core - full CLI kept, no UI required
-  tripflare_ui.pyw      # tkinter console (5 tabs, stdlib only)
-  tripflare_tray.pyw    # system tray agent (ctypes Win32, stdlib only)
-  tripflare.ico         # tray/console icon (scripts\make_icon.py rebuilds it)
-  config.json           # live config (editable in the UI, git-ignored)
-  config.default.json
-  prompts\  docs\  scripts\  README.md  LICENSE  .gitignore
-  data\                 # state.json / alerts.jsonl / reviews\ /
-                        # URGENT.txt / tripflare.log / tray.log (git-ignored)
-```
 
-The data directory defaults to `<script dir>\data`; set the
-`TRIPFLARE_DATA_DIR` environment variable to override it.
-
-## System tray agent (tripflare_tray.pyw)
-
-Pure Win32 via ctypes (Shell_NotifyIconW) — zero third-party packages:
-
-- Persistent notification-area icon; double-click opens the console.
-- Right-click menu: 打开控制台 / 立即AI研判 / 启动守护 / 停止守护 /
-  打开数据目录 / 退出托盘.
-- Tails `data\alerts.jsonl`: a new **high** alert pops a balloon
-  ("TripFlare 高危异常"); clicking it opens the console alerts page.
-  Balloon events are logged to `data\tray.log`.
-- Tooltip mirrors daemon state (refreshed every 30 s).
-- Re-adds its icon when Explorer restarts (TaskbarCreated).
-
-`install.ps1` registers it as the `TripFlareTray` logon task
-(restart-on-failure, no run-time limit) and starts it immediately.
-
-## 30-second quickstart
-
-GUI way: double-click **`TripFlare控制台.bat`**. The 状态 (status) tab
-starts/stops the daemon, runs a scan round, and opens the data folder.
-
-CLI way (everything works without the UI, for headless/GitHub users):
-
-```bat
-git clone <repo> TripFlare && cd TripFlare
-python tripflare.py --init        :: build the baseline (no alerts)
-python tripflare.py               :: run the daemon (Ctrl+C to stop)
-```
-
-Other commands: `digest` (unread alerts), `ai-review [--max N]` (one-shot
-AI review), `allow <path-or-signer>` (allowlist), `status`, `--bench`
-(timed round), `patrol-tick` (scheduler entry for patrol mode).
-
-## Console UI (tripflare_ui.pyw)
-
-Five tabs, Chinese interface, pure local tkinter (no ports opened):
-
-- **告警 (Alerts)**: sortable table (time / level / type / path / score /
-  reasons), high=red, warn=orange, info=gray; unread-only toggle, refresh,
-  allowlist-selected, and an **AI 研判** button that runs the review in a
-  background thread with a busy hint, then jumps to the new report.
-- **报告 (Reports)**: list of `data\reviews\*.md` with a read-only viewer;
-  double-click opens externally.
-- **日志 (Log)**: tail of `tripflare.log`, optional 5-second auto-refresh.
-- **配置 (Config)**: form for the common knobs (scan interval, ai.mode,
-  AI backend path, daily AI cap, patrol interval) plus an advanced JSON
-  editor validated before saving.
-- **状态 (Status)**: daemon state (detected by process command line),
-  last-round stats, and buttons: start/stop daemon (scheduled task),
-  open data folder, run one scan round.
-
-The header always shows a daemon status dot (green/gray) and the last
-alert time. `--alerts` opens directly on the alerts tab (used by the
-tray balloon click); `--selftest` runs a headless sanity check.
-
-## Auto-start at logon (optional)
-
+To register silent auto-start background daemon + system tray + scheduled AI patrol via Windows Task Scheduler:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
-# removes them again:
+```
+Uninstall scheduled tasks anytime:
+```powershell
 powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 ```
 
-`install.ps1` registers three scheduled tasks: `TripFlareDaemon` (pythonw,
-windowless, at logon), `TripFlarePatrol` (`patrol-tick` every 30 min — a
-complete no-op unless `ai.mode` is `patrol`) and `TripFlareTray` (the tray
-agent at logon, restarted on failure, started immediately).
+---
 
-## Three AI modes
+## AI Triage Configuration (Optional)
 
-| Mode | AI calls | Cost | For whom |
-| --- | --- | --- | --- |
-| `recommend` (default) | only when you click AI 研判 after a high alert | 0 by default | most users |
-| `patrol` | immediate on high alerts (10-min cooldown) + routine every 30 min, hard cap 20/day | ~5-15k tokens per patrol, you pay | high-security users |
-| `off` | never (manual `ai-review` still possible) | 0 | air-gapped / paranoid |
+TripFlare monitors and alerts cleanly **even with AI disabled**. To enable AI explanations and risk verdicts, open the **Config** tab in `TripFlare` (or edit `config.json`):
 
-Set `"ai": {"mode": "..."}` in `config.json` (or the UI config tab). The
-AI backend is any CLI that maps `-p "<prompt>"` to text on stdout —
-kimi.exe is auto-detected; point `ai.backend_path` at anything else.
+### 1. 100% Local & Private via Ollama (Zero API Cost)
+If [Ollama](https://ollama.com) is running locally (`http://127.0.0.1:11434`), `provider: "auto"` detects your installed models automatically.
+```json
+{
+  "ai": {
+    "enabled": true,
+    "provider": "ollama",
+    "api_base": "http://127.0.0.1:11434",
+    "model": "qwen2.5:7b"
+  }
+}
+```
 
-Reviews are incremental: only unread warn/high alerts are sent (info-level
-never goes to the AI), and reviewed alerts are marked read in
-`data\read_alerts.json` — the same read state the console UI shows, so an
-alert is never reviewed twice.
+### 2. Any OpenAI-Compatible API (OpenAI / DeepSeek / Groq / OpenRouter / LM Studio)
+```json
+{
+  "ai": {
+    "enabled": true,
+    "provider": "openai",
+    "api_base": "https://api.openai.com/v1",
+    "api_key": "sk-your-key",
+    "model": "gpt-4o-mini"
+  }
+}
+```
 
-In patrol mode the AI investigates read-only (signatures, file headers,
-hash lookups, registry cross-checks) and writes `data\reviews\patrol-*.md`;
-`high` verdicts escalate to `URGENT.txt` + notification. Auto-quarantine
-exists (`ai.patrol.allow_auto_quarantine`) but is **off by default** and
-documented as dangerous. Guardrails live in
-[prompts/patrol_prompt.md](prompts/patrol_prompt.md).
+### 3. Local CLI Security/Coding Agent
+```json
+{
+  "ai": {
+    "enabled": true,
+    "provider": "cli",
+    "cli_cmd": "kimi",
+    "cli_args": ["--print", "-p", "{prompt}"]
+  }
+}
+```
 
-## Measured performance
+---
 
-Test host: Windows 11, ~2 400 watched files, 189 scheduled tasks, 678
-services, 60 s interval.
+## Architecture
 
-| Metric | Light round (4 of 5) | Heavy round (every 5th) |
-| --- | --- | --- |
-| Wall time | ~0.9-1.1 s | ~1.8 s (measured 1.805 / 1.790 / 1.796 s) |
-| Daemon memory | 24 MB working set | same |
+```
+  Win32 ReadDirectoryChangesW (Startup / Downloads / Desktop / Temp / Profile)
+        │  < 1s coalesced path events
+        ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ tripflare.py (Daemon & Forensic Engine, stdlib-only)                │
+  │  • File SHA-256 + WinVerifyTrust / Certutil Authenticode cache      │
+  │  • PE VersionInfo OriginalFilename vs disk filename (LOLBin check)  │
+  │  • Registry Run/RunOnce, IFEO, AppInit_DLLs, Proxy, LSA, Winlogon   │
+  │  • Scheduled Tasks (XML/Actions), Services, WMI EventConsumers      │
+  │  • High-frequency false-positive filters (DISM, _MEI*, Edge, etc.)  │
+  └──────────┬────────────────────────┬──────────────────────┬──────────┘
+             │ data/alerts.jsonl      │ data/URGENT.txt      │
+             ▼                        ▼                      ▼
+  ┌────────────────────┐   ┌────────────────────┐   ┌───────────────────┐
+  │ tripflare_ui.pyw   │   │ tripflare_tray.pyw │   │ BYOK AI Triage    │
+  │ Console (Tkinter)  │   │ Pure ctypes Win32  │   │ Ollama / OpenAI / │
+  │ Live alerts, diffs │   │ Tray icon & toast  │   │ Local CLI agent   │
+  │ EN / 中文 toggle    │   │ Quick containment  │   │ Prompt-customizable│
+  └────────────────────┘   └────────────────────┘   └───────────────────┘
+```
 
-Average CPU is well under 1 % of one core; steady-state disk I/O is
-directory metadata only (NTFS cache), plus one PowerShell process snapshot
-per round and a handful of `reg query` calls.
+For deep module design, threat scoring weights, and file layouts, see [docs/DESIGN.md](docs/DESIGN.md).
 
-## Blind spots (read before trusting it)
+---
 
-TripFlare is a tripwire, **not antivirus**: no rootkit, fileless, or
-in-memory detection; a baseline taken after compromise blesses the malware;
-process watching is path-first-seen, not behavioral. It complements
-periodic full scans (e.g. Emsisoft Emergency Kit) and a real AV. Patrol
-mode costs real AI quota (circuit breaker included). The AI is read-only
-unless you explicitly enable quarantine. TripFlare never alerts on itself:
-`pythonw.exe`, the AI backend, and everything under the install/data
-directories are whitelisted.
+## Detection Matrix & Blind Spots
 
-## License
+| Monitored Perimeter | Signals Evaluated | Typical Catch |
+| :--- | :--- | :--- |
+| **Hot Directories** (Real-time + 60s) | New `.exe/.dll/.ps1/.bat/.vbs/.js/.lnk`, SHA-256 changes, unsigned PE, temp-dir execution, random high-entropy names, PE `OriginalFilename` mismatch | Dropped payloads, fake `Invoice.exe` (`CertUtil.exe` rename), `%TEMP%` updaters |
+| **Persistence Hives** | `HKCU/HKLM Run/RunOnce`, Startup folders, Scheduled Tasks (`Actions`/`Arguments`), Windows Services (`ImagePath`), WMI `__EventConsumer` | Silent reboot persistence & sneaky COM/WMI backdoors |
+| **System Hijack Points** | IFEO `Debugger`, `AppInit_DLLs`, `Winlogon Shell/Userinit`, `LSA Security Packages`, system `hosts`, browser extensions | Credential theft hooks, debugger hijacks, DNS overrides |
 
-MIT — see [LICENSE](LICENSE).
+**Known Blind Spots (by design):**
+- Kernel rootkits, BYOVD drivers, and pre-OS bootkits (user-mode cannot inspect kernel memory).
+- Purely fileless in-memory process injection (`VirtualAllocEx` / shellcode) that never touches disk, registry, tasks, services, or WMI.
+- Encrypted outbound C2 channels (TripFlare deliberately stays lightweight without an NDIS/WFP packet driver).
 
 ---
 
 ## 中文说明
 
-TripFlare 是一个轻量级 Windows 异常监控（绊线式）工具：对首次入侵最常
-触碰的位置建立基线（下载/临时/桌面/AppData/启动目录、Run 键、
-Winlogon、StartupApproved、IFEO、服务、计划任务、高危位置新进程），
-用本地启发式规则打分（无签名 +3、未知签名者 +2、随机名 +3、伪装运
-行库 +4、高危目录 +2、隐藏属性 +1、持久化 +3），≥7 分为高危：写
-`URGENT.txt`，并由**系统托盘代理**弹气球通知（旧版桌面 bat 方案已废
-弃，默认关闭）。
+### 为什么需要 TripFlare？
 
-**便携单文件夹**：代码、配置、数据（`data\`）全部在一个目录里。
-双击 `TripFlare控制台.bat` 打开图形控制台（告警/报告/日志/配置/状态
-五个页签）；任务栏右下角常驻托盘图标，双击开控制台、右键有快捷菜单
-（打开控制台 / 立即AI研判 / 启动·停止守护 / 打开数据目录 / 退出），
-出现高危告警时托盘弹气球、点击直达告警页；命令行用法全部保留，不用
-UI 也能完整使用。
+现代 Windows 终端入侵往往不靠已知病毒样本，而是通过**高隐蔽动作**完成驻留：
+- 把系统自带白程序（如 `CertUtil.exe`、`mshta.exe`）伪装重命名为 `Invoice_2026.exe` 放进下载目录执行（**LOLBin 白利用**）
+- 在 `HKCU\...\Run`、启动文件夹、计划任务、系统服务或 WMI 事件订阅中写入静默自启动
+- 向 `%TEMP%`、`AppData` 或浏览器扩展目录写入未签名脚本或加载器
 
-三档 AI 模式：`recommend`（默认，不点研判不花 token）、`patrol`
-（高危立即巡逻 10 分钟冷却 + 每 30 分钟例行巡逻，每日上限 20 次熔
-断，AI 默认只读）、`off`（纯本地）。AI 后端默认自动探测 kimi.exe，
-可换任何"收 prompt 出文本"的命令行工具。研判为增量口径：只发送上
-次以来未读的中/高级告警（信息级不送 AI），研判处自动标记已读，与
-控制台告警页的已读状态同源，同一告警绝不重复送审。
+**TripFlare** 采用 **「基线变更 + 异常评分 + 本地/云端 AI 研判」** 的极简架构：
+- **零第三方依赖**：核心引擎 100% 基于 Python 3.8+ 标准库，无任何 `pip` 依赖、无内核驱动、无入站监听端口。
+- **毫秒级实时拌线捕获**：通过 Win32 `ReadDirectoryChangesW` 实时监听 Downloads / Desktop / 启动项 / Temp 等高危目录（空闲 CPU 几乎为 0），叠加 60 秒周期性全量基线比对与 PE 原生文件名检测。
+- **BYOK 多模型 AI 研判**：内置零依赖 HTTP 客户端，开箱支持本地 **Ollama**（完全离线隐私）、任意 **OpenAI 兼容接口**（OpenAI / DeepSeek / Groq / OpenRouter / LM Studio 等）以及本地 **CLI Agent**，直接输出中文可读结论与处置建议。
+- **中英文实时切换**：自动识别 Windows 系统语言，也可通过控制台右上角 `EN / 中文` 按钮一键切换界面与 AI 报告语言。
 
-上手：双击 `TripFlare控制台.bat`，在"状态"页启动守护；或命令行
-`python tripflare.py --init` 建基线 → `python tripflare.py` 跑守护。
-`scripts\install.ps1` 可注册登录自启、定时巡逻、系统托盘三个计划任务
-（TripFlareDaemon / TripFlarePatrol / TripFlareTray，托盘装完立即启动），
-`uninstall.ps1` 回滚。实测每轮约 0.9–1.8 秒、内存约 24MB，平均
-CPU 远低于 1%。
+### 快速开始
 
-它是绊线而非杀软：防不住 rootkit / 无文件 / 内存攻击，与定期全盘扫
-描互补；patrol 模式烧的是你自己的配额（有熔断）；AI 默认只读，自动
-隔离需显式开启。
+- **方式一（免安装便携版，推荐）**：前往 [GitHub Releases](https://github.com/AizoLau/TripFlare/releases) 下载 `TripFlare-v*-win64-portable.zip`，解压后双击 `TripFlare.exe` 即可使用（点击 **初始化基线** -> **启动守护**）。
+- **方式二（源码运行，零依赖）**：
+  ```powershell
+  git clone https://github.com/AizoLau/TripFlare.git
+  cd TripFlare
+  python tripflare.py --init
+  TripFlare.bat
+  ```
+- **开启 AI 研判**：在控制台「配置与白名单」页选择 AI 引擎（`auto` 会自动探测本地 Ollama；或填入任意 OpenAI 兼容 `API Base` 与 `API Key`），保存后点击「AI 研判」即可。
+
+---
+
+## Contributing & License
+
+Contributions, detection rule PRs, and issue reports are welcome!
+Before opening a PR, please run the zero-AI local verification suite:
+```powershell
+python -m unittest discover -s tests -v
+python tripflare_ui.pyw --selftest
+python tripflare_tray.pyw --menutest
+```
+
+Released under the [MIT License](LICENSE).

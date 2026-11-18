@@ -1,7 +1,11 @@
 {
   "_comment": "TripFlare default configuration. Copy to config.json (next to tripflare.py) and edit; config.json wins over this file. JSON has no comments, so explanatory fields are prefixed with underscore.",
+  "language": "auto",
+  "_language": "UI and AI report language: 'auto' (follow OS locale), 'en' (English), or 'zh' (Simplified Chinese).",
   "interval_seconds": 60,
-  "_interval_seconds": "Seconds between scan rounds in daemon mode (60-600 recommended).",
+  "_interval_seconds": "Seconds between periodic scan rounds in daemon mode (60-600 recommended).",
+  "realtime_watch": true,
+  "_realtime_watch": "Enable Win32 ReadDirectoryChangesW instant tripwire on Startup / Downloads / Desktop / Temp.",
   "heavy_interval_rounds": 5,
   "_heavy_interval_rounds": "Services / scheduled tasks / IFEO / StartupApproved are diffed every N rounds (heavy snapshot).",
   "sha1_max_bytes": 52428800,
@@ -9,10 +13,12 @@
   "max_dir_entries": 20000,
   "_max_dir_entries": "Directories with more entries than this are skipped (add game/cache dirs to exclude_dirs).",
   "state_process_cap": 5000,
+  "system_noise_filter": true,
+  "_system_noise_filter": "Suppress noisy OS/background churn (DISM Temp servicing, Microsoft-signed runtime DLLs in Temp, per-user LUID services, browser auto-update churn, ephemeral .tmp.js / PS policy probes).",
   "score_thresholds": { "warn": 3, "high": 7 },
-  "_score_thresholds": ">=7 high (notify + desktop bat + URGENT.txt), 3-6 warn, <3 info.",
+  "_score_thresholds": ">=7 high (URGENT.txt + tray balloon), 3-6 warn, <3 info.",
   "allowlist": {
-    "_comment": "Manage with: tripflare.py allow <path-or-signer>. Signers are matched as case-insensitive substrings of the certificate subject, e.g. allow \"CN=Microsoft Windows\".",
+    "_comment": "Manage with: tripflare.py allow <path-or-signer> or via the console UI.",
     "paths": [],
     "signers": []
   },
@@ -21,10 +27,18 @@
   "watch_dirs": null,
   "_watch_dirs": "null = built-in defaults: Startup x2 (depth 2), ProgramData (2), Downloads/Desktop (3), AppData Roaming/Local (2), Temp (1), user profile root (1). Override as [[path, depth], ...].",
   "ai": {
-    "_comment": "Three modes: 'recommend' (default, AI only when you double-click the desktop bat), 'patrol' (AI runs automatically: immediately on high alerts + on a timer), 'off' (local heuristics only, never calls AI).",
+    "_comment": "Three modes: 'recommend' (default, zero tokens until user clicks AI Review), 'patrol' (automatic on high alerts + timer), 'off' (local heuristics only).",
     "mode": "recommend",
+    "provider": "auto",
+    "_provider": "'auto' | 'ollama' | 'openai' | 'cli'. Auto checks api_key -> CLI tool -> local Ollama.",
+    "api_base": "",
+    "_api_base": "Optional base URL (defaults: http://127.0.0.1:11434 for Ollama, https://api.openai.com/v1 for OpenAI-compatible APIs).",
+    "api_key": "",
+    "_api_key": "Optional API key for OpenAI-compatible endpoints (or set TRIPFLARE_API_KEY / OPENAI_API_KEY env var).",
+    "model": "",
+    "_model": "Model name (optional: auto-detects first local model for Ollama; defaults to gpt-4o-mini for OpenAI).",
     "backend_path": "auto",
-    "_backend_path": "'auto' detects kimi.exe (~/.kimi-code/bin/kimi.exe, then PATH). Any CLI that maps '<bin> -p \"prompt\"' to text on stdout works; override backend_args if yours differs.",
+    "_backend_path": "Used when provider is 'cli' (or auto fallback): 'auto' detects kimi.exe, or point to any CLI accepting '<bin> -p \"prompt\"'.",
     "backend_args": ["-p", "{prompt}"],
     "timeout_seconds": 600,
     "max_calls_per_day": 20,
@@ -41,8 +55,8 @@
   },
   "notify": {
     "balloon": true,
-    "_balloon": "Fallback balloon on high alerts for tray-less users (non-blocking PowerShell NotifyIcon). Set false when tripflare_tray.pyw owns notifications (this machine: tray installed).",
+    "_balloon": "Fallback balloon on high alerts for tray-less users (non-blocking PowerShell NotifyIcon). Set false when tripflare_tray owns notifications.",
     "desktop_bat": false,
-    "_desktop_bat": "DEPRECATED - the tray agent replaced the desktop bat. When true, high alerts (recommend/off modes) still drop 'TripFlare-运行AI研判.bat' on the desktop."
+    "_desktop_bat": "DEPRECATED - the tray agent replaced the desktop bat."
   }
 }

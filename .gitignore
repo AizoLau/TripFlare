@@ -21,3 +21,9 @@ __pycache__/
 # OS noise
 Thumbs.db
 Desktop.ini
+
+# Packaging / build artifacts
+dist/
+build/
+*.spec
+ui_focus.req
